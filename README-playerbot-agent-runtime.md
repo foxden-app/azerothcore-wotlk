@@ -1,49 +1,49 @@
-# PlayerBot Agent Runtime
+# PlayerBot Agent 运行手册
 
-Local runtime notes for the `playerbot-agent` branch.
+这是 `playerbot-agent` 分支的本地运行说明。它不是架构设计文档；架构和开发方向以 [ARCHITECTURE-agent-playerbots.md](/home/wuya/git/azerothcore-wotlk-git/ARCHITECTURE-agent-playerbots.md) 为准。
 
-## Source
+## 源码
 
-- Core branch: `playerbot-agent`
-- Core upstream: `playerbots-core/Playerbot`
-- Module path: `modules/mod-playerbots`
-- Module upstream: `https://github.com/mod-playerbots/mod-playerbots.git`
+- 核心分支：`playerbot-agent`
+- 核心上游：`playerbots-core/Playerbot`
+- Playerbots 模块目录：`modules/mod-playerbots`
+- Playerbots 模块上游：`https://github.com/mod-playerbots/mod-playerbots.git`
 
-The module directory is a local nested Git checkout and is ignored by the
-root repository, matching AzerothCore's normal module workflow.
+`modules/mod-playerbots` 是一个本地嵌套 Git checkout，并被根仓库忽略。这符合 AzerothCore 模块的常见使用方式。
 
-## Runtime
+## 运行路径
 
-- Worldserver: `/home/wuya/git/azerothcore-wotlk-git/env/dist/bin/worldserver`
-- Config: `/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/worldserver.conf`
-- Playerbots config: `/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/modules/playerbots.conf`
-- Logs: `/home/wuya/git/azerothcore-wotlk-git/env/dist/logs`
-- tmux session: `playerbot-world`
+- worldserver：`/home/wuya/git/azerothcore-wotlk-git/env/dist/bin/worldserver`
+- worldserver 配置：`/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/worldserver.conf`
+- Playerbots 配置：`/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/modules/playerbots.conf`
+- 日志目录：`/home/wuya/git/azerothcore-wotlk-git/env/dist/logs`
+- tmux 会话：`playerbot-world`
 
-Ports:
+端口：
 
-- Authserver: `3724`
-- PlayerBot realm: `8086`
-- SOAP: `7879`
+- 共享 authserver：`3724`
+- PlayerBot worldserver：`8086`
+- SOAP：`7879`
 
-Databases:
+数据库：
 
-- Shared auth: `acore_auth`
-- PlayerBot world: `acore_playerbot_world`
-- PlayerBot characters: `acore_playerbot_characters`
-- PlayerBot module: `acore_playerbots`
+- 共享登录库：`acore_auth`
+- PlayerBot world 库：`acore_playerbot_world`
+- PlayerBot 角色库：`acore_playerbot_characters`
+- Playerbots 模块库：`acore_playerbots`
 
-Realm entry:
+Realm：
 
 - `realmlist.id = 2`
-- name: `Agent PlayerBot`
-- address: `38.207.189.99`
-- port: `8086`
+- 名称：`Agent PlayerBot`
+- 地址：`38.207.189.99`
+- 端口：`8086`
 
-## Current Tuning
+## 当前调优
 
-This server is tuned for Agent-driven bot control instead of ambient random
-population:
+这个服现在按“Agent 控制的 bot 池”来跑，不按“随机机器人生态服”来跑。
+
+关键配置：
 
 - `AiPlayerbot.RandomBotAutologin = 0`
 - `AiPlayerbot.MinRandomBots = 0`
@@ -56,16 +56,13 @@ population:
 - `MapUpdateInterval = 50`
 - `MapUpdate.Threads = 1`
 
-Random bot autologin is intentionally disabled. The runtime is configured as
-an Agent-controlled bot pool, not as a full ambient random-bot world.
+也就是说，随机 bot 不会自动上线。当前保留的是 AddClass bot 池，后续由 Agent 按需召唤和控制。
 
-The bot account prefix is `pbagent`. The initial database contains 55 bot
-accounts and 550 generated bot characters, with 50 accounts assigned to the
-AddClass pool for quick party creation.
+bot 账号前缀是 `pbagent`。初始数据库里有 55 个 bot 账号、550 个 bot 角色，其中 50 个账号被分配给 AddClass 池。
 
-## Operations
+## 常用操作
 
-Check status:
+查看状态：
 
 ```bash
 tmux ls
@@ -74,36 +71,39 @@ tail -n 80 env/dist/logs/Server.log
 tail -n 80 env/dist/logs/Playerbots.log
 ```
 
-Attach to the server console:
+进入 worldserver 控制台：
 
 ```bash
 tmux attach -t playerbot-world
 ```
 
-Stop from outside tmux:
+从 tmux 外停止 worldserver：
 
 ```bash
 tmux send-keys -t playerbot-world C-c
 ```
 
-Start from outside tmux:
+从 tmux 外启动 worldserver：
 
 ```bash
 tmux new-session -d -s playerbot-world \
   "cd /home/wuya/git/azerothcore-wotlk-git/env/dist/bin && exec ./worldserver --config /home/wuya/git/azerothcore-wotlk-git/env/dist/etc/worldserver.conf >> /home/wuya/git/azerothcore-wotlk-git/env/dist/logs/worldserver.playerbot.stdout.log 2>&1"
 ```
 
-## Host Resources
+## 主机资源
 
-Swap was expanded on 2026-05-08 by adding:
+2026-05-08 已新增一个 12G swap 文件：
 
 ```text
-/swap-playerbot.img  12G
+/swap-playerbot.img
 ```
 
-The original `/swap.img` remains in place, so total swap is now about 16G.
-The new swap file is persisted in `/etc/fstab`.
+原来的 `/swap.img` 仍然保留，所以总 swap 约 16G。新增 swap 已写入 `/etc/fstab`，重启后会自动启用。
 
-Current major memory consumers are normally the PlayerBot `worldserver`,
-VS Code server, and MySQL. FRP, foxden, and foxhole-postgres are lightweight
-relative to the PlayerBot server.
+当前主要资源消耗通常来自：
+
+- PlayerBot `worldserver`
+- VS Code server
+- MySQL
+
+FRP、foxden 网站和 foxhole-postgres 相对很轻，不是当前资源压力的主要来源。
