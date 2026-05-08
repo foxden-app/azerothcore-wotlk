@@ -16,6 +16,8 @@
 !/var/ccache/.gitkeep
 /env/dist/*
 !/env/dist/.gitkeep
+/env/agent/
+/env/agent-release/
 /env/user/*
 /.env*
 /apps/joiner
@@ -89,6 +91,8 @@ coverage-report/
 .gradle
 tmp/
 *.tmp
+*.pyc
+__pycache__/
 *.swp
 *~.nib
 local.properties
