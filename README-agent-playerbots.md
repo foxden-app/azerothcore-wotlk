@@ -10,17 +10,19 @@
 
 - 基于 `mod-playerbots/azerothcore-wotlk` 的 `Playerbot` 分支启动新核心。
 - 安装 `modules/mod-playerbots`。
+- 新增 `modules/mod-playerbot-agent` 游戏内薄桥。
+- 新增 `tools/playerbot-agent/agent_bridge.py` Python 侧车。
 - 建立独立数据库：`acore_playerbot_world`、`acore_playerbot_characters`、`acore_playerbots`。
 - 复用生产 `acore_auth`，新增 Realm `Agent PlayerBot`，端口 `8086`。
 - 生成 `PBAGENT*` bot 账号和 AddClass bot 池。
 - 关闭随机 bot 自动上线，避免空服跑随机生态。
 - 保留 AddClass 能力，作为后续 Agent 按需召唤 bot 的入口。
+- 已实现第一批中文指挥 skill：跟随、停下、撤退、攻击、拉怪、重点治疗、拾取策略、buff 策略、治疗安全/补输出。
 
 还没完成：
 
-- 还没有接 LLM-Agent。
-- 还没有把聊天“加我/加个奶/来个坦”转成 Playerbots 命令。
-- 还没有实现强类型 C++ Adapter。
+- 还没有把“召唤/删除/初始化 bot”交给 LLM-Agent 自动执行。
+- 还没有实现邀请真实玩家进队。
 - 还没有做长期记忆、复盘、任务规划。
 
 ## 怎么玩
@@ -98,6 +100,36 @@ attack
 pull
 ```
 
+如果 worldserver 和 Python 侧车都已启动，也可以直接用中文队伍聊天/密语：
+
+```text
+牧师跟我
+牧师停一下
+治疗加我
+安心奶，别输出
+捡垃圾
+别捡了
+补buff
+```
+
+这些话会先进入 `mod-playerbot-agent`，再由 Python 侧车转成白名单动作。没有配置大模型时，规则模式也能处理上面的常用指令。
+
+启动侧车：
+
+```bash
+cd /home/wuya/git/azerothcore-wotlk-git
+PLAYERBOT_AGENT_DB_DSN='127.0.0.1;3306;acore;acore;acore_playerbots' \
+  python3 tools/playerbot-agent/agent_bridge.py --rule-only
+```
+
+接 LLM 时增加：
+
+```bash
+OPENAI_API_KEY=...
+OPENAI_BASE_URL=https://api.openai.com/v1
+PLAYERBOT_AGENT_MODEL=...
+```
+
 ## 当前可调用本能速查
 
 完整能力矩阵见：[ARCHITECTURE-agent-playerbots.md](/home/wuya/git/azerothcore-wotlk-git/ARCHITECTURE-agent-playerbots.md) 的“Playerbots 提供的本能”。
@@ -116,6 +148,23 @@ pull
 | `init_instance_quests` | `.playerbots bot quests <机器人名>` |
 
 已经存在但需要 Adapter 再包装的本能：`follow`、`stay`、`flee/runaway`、`attack`、`pull`、`max dps`、`ready`、`revive`、任务交互、交易/买卖/装备、施法、宠物控制、`set_strategy`、邀请真实玩家。
+
+当前 v1 已经包装的本能：
+
+| 中文玩法 | Agent skill | Playerbots 小脑 |
+| --- | --- | --- |
+| “跟我/过来/跟上” | `bot_follow` | `follow` |
+| “停下/原地/别动” | `bot_stay` | `stay` |
+| “撤/别打了/脱战” | `bot_retreat` | `flee` |
+| “跑远/散开” | `bot_runaway` | `runaway` |
+| “打我的目标/集火” | `bot_attack_target` | `attack` |
+| “拉怪/开怪” | `bot_pull` | `pull` |
+| “加我/奶我/保我” | `focus_heal_add` | `focus heal +玩家名` |
+| “不用加我/别盯我” | `focus_heal_remove` | `focus heal -玩家名` |
+| “安心奶/别输出/别抢仇恨” | `healer_safe` | `-healer dps` |
+| “帮忙输出/爆发” | `healer_burst` 或 `max dps` | `+healer dps` / `max dps` |
+| “捡垃圾/全捡/别捡” | `loot_gray` / `loot_all` / `loot_off` | `ll gray/all` 或 `-loot` |
+| “补buff/别补buff” | `buff_on` / `buff_off` | `+buff` / `-buff` |
 
 随机 bot 生态、自动 LFG/BG、世界/公会频道聊天、`rndbot`、`gtask`、`pmon/debug`、账号绑定等能力当前不作为 LLM-Agent 可自由调用的本能。
 

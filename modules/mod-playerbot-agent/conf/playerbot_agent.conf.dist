@@ -1,0 +1,13 @@
+#
+# Playerbot Agent bridge
+#
+
+# Enable the in-game bridge that queues player chat for the Python sidecar
+# and executes whitelisted Playerbots instincts from the action queue.
+AgentPlayerbot.Enabled = 1
+
+# How often worldserver polls acore_playerbots.agent_playerbot_actions.
+AgentPlayerbot.ActionPollIntervalMs = 500
+
+# Hard cap for text sent by the bridge as bot chat.
+AgentPlayerbot.MaxReplyLength = 220

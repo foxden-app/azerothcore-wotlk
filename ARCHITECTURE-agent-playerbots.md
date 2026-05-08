@@ -10,6 +10,23 @@
 
 当前分支不再沿着旧的 `mod-agent-control` 自研底层行为继续合并开发，而是以成熟的 `mod-playerbots` 作为底层行为/本能系统，在其上增加 LLM-Agent 的聊天理解、任务理解、队伍意图识别和宏观调度。
 
+2026-05-08 已落地第一版试验实现：
+
+```text
+modules/mod-playerbot-agent
+  - 游戏内薄桥接模块
+  - 捕获真实玩家聊天
+  - 把事件写入 acore_playerbots.agent_playerbot_events
+  - 轮询 acore_playerbots.agent_playerbot_actions
+  - 只执行 reply / command / strategy 三类白名单动作
+
+tools/playerbot-agent/agent_bridge.py
+  - Python 侧车大脑
+  - 中文规则优先
+  - 可选 OpenAI-compatible LLM
+  - 输出 Playerbots 小脑可执行的安全动作
+```
+
 核心分层：
 
 ```text
@@ -70,6 +87,8 @@ Playerbots库:  acore_playerbots
 核心分支:      playerbot-agent
 核心上游:      playerbots-core/Playerbot
 模块:          modules/mod-playerbots
+Agent桥模块:   modules/mod-playerbot-agent
+Agent侧车:     tools/playerbot-agent/agent_bridge.py
 ```
 
 Realm：
@@ -102,6 +121,9 @@ AiPlayerbot.AddClassAccountPoolSize = 50
 AiPlayerbot.ApplyInstanceStrategies = 1
 AiPlayerbot.CombatStrategies = "-healer dps"
 AiPlayerbot.CommandServerPort = 0
+AgentPlayerbot.Enabled = 1
+AgentPlayerbot.ActionPollIntervalMs = 500
+AgentPlayerbot.MaxReplyLength = 220
 ```
 
 服务器性能调优：
@@ -257,7 +279,30 @@ dk:      blood, frost, unholy, tank assist, pull, aoe
 
 ### 第一批建议暴露给 LLM-Agent 的本能 API
 
-第一阶段只做低风险闭环：
+第一阶段 v1 已实现的是“聊天 + 指挥队伍内 AddClass bot”，不包含召唤、删除、初始化 bot。原因是这些 `.playerbots bot ...` 命令需要玩家会话上下文，不能安全地让 Python 侧车通过 SOAP 控制；v1 先把已经在线/已入队的 bot 变成可聊天、可指挥的小队成员。
+
+| Skill | 底层小脑语言 | 说明 |
+| --- | --- | --- |
+| `reply` / `no_reply` | bot 以 `party`/`whisper`/`say` 发言 | 人设聊天和简短确认。 |
+| `bot_follow` | `follow` | 跟随主人/队伍。 |
+| `bot_stay` | `stay` | 原地停留。 |
+| `bot_retreat` | `flee` | 跟随撤退，偏保守。 |
+| `bot_runaway` | `runaway` | 跑远/散开。 |
+| `bot_attack_target` | `attack` | 攻击玩家当前目标。 |
+| `bot_pull` | `pull` | 让 bot 拉玩家当前目标。 |
+| `bot_ready` | `ready` | 准备确认。 |
+| `focus_heal_add` | `focus heal +<玩家名>` | 治疗 bot 重点照看某个队友，例如“加我/奶我”。 |
+| `focus_heal_remove` | `focus heal -<玩家名>` | 取消重点治疗。 |
+| `focus_heal_clear` | `focus heal clear` | 清空重点治疗列表。 |
+| `loot_off` | `-loot` | 关闭非战斗拾取策略。 |
+| `loot_normal` | `+loot` + `ll normal` | 恢复正常拾取策略。 |
+| `loot_gray` | `+loot` + `ll gray` | 允许捡灰色垃圾。 |
+| `loot_all` | `+loot` + `ll all` | 全捡。 |
+| `buff_on` / `buff_off` | `+buff` / `-buff` | 打开/关闭非战斗 buff 策略。 |
+| `healer_safe` | `-healer dps` | 治疗专心奶，降低抢仇恨风险。 |
+| `healer_burst` | `+healer dps` | 允许治疗补输出。 |
+
+第二阶段再补召唤和队伍生命周期：
 
 ```text
 summon_bot(role, class_hint, gender?)
@@ -267,18 +312,7 @@ lookup_bot_pool()
 init_bot(bot_name, mode="auto")
 refresh_bot(bot_name)
 level_bot(bot_name)
-```
-
-第二阶段再补队伍和指挥：
-
-```text
 invite_player(player_name)
-bot_follow(bot_name, target?)
-bot_stay(bot_name)
-bot_attack_target(bot_name, target)
-bot_pull(bot_name, target)
-set_strategy(bot_name|group, add=[], remove=[], state)
-bot_chat_command(bot_name|group, command, args)
 ```
 
 第三阶段再考虑任务、交易、补给、旅行、随机生态和副本专用调度。
@@ -365,28 +399,28 @@ invite_player(target_player)
 
 ## Agent 控制接口路线
 
-当前还没有接 LLM-Agent。下一步不是直接改职业循环，而是先做薄适配层。
+当前已经接入第一版薄适配层。
 
-第一阶段：命令桥
+第一阶段 v1：DB 队列桥
 
 ```text
-聊天事件/外部 API
-  -> LLM/规则识别意图
-  -> 白名单结构化 intent
-  -> SOAP 或安全命令执行
-  -> Playerbots 命令
+真实玩家聊天
+  -> mod-playerbot-agent 写 agent_playerbot_events
+  -> Python sidecar 规则/LLM 识别意图
+  -> 写 agent_playerbot_actions
+  -> mod-playerbot-agent 执行白名单动作
+  -> Playerbots 小脑处理具体行为
 ```
 
-优点：实现快，能验证“聊天理解 -> 调用本能”。
+优点：不需要让 Python 伪造玩家会话；bot 可以以自己的身份说话；Playerbots 仍然负责具体战斗和移动。
 
-缺点：命令文本脆弱，结果回传粗糙。
+限制：v1 只对在线队伍 bot 生效；不让 LLM 自由拼英文命令；召唤/删除/初始化仍由玩家手动 `.playerbots bot ...` 操作。
 
-第二阶段：C++ Adapter
+第二阶段：更完整 C++ Adapter
 
 ```text
-modules/mod-agent-playerbot-adapter
-  - 捕获聊天事件
-  - 暴露安全 HTTP/IPC API
+modules/mod-playerbot-agent
+  - 增加更强类型的 bot 生命周期 API
   - 提供 summon_bot / invite_player / dismiss_bot / set_strategy 等强类型动作
   - 内部调用 Playerbots 管理器或排队操作
 ```
