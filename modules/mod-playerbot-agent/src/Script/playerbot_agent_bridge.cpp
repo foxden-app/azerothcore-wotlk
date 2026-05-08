@@ -586,8 +586,11 @@ public:
     {
     }
 
-    bool OnPlayerCanUseChat(Player* player, uint32 type, uint32 /*language*/, std::string& msg) override
+    bool OnPlayerCanUseChat(Player* player, uint32 type, uint32 language, std::string& msg) override
     {
+        if (language == LANG_ADDON)
+            return true;
+
         if (type != CHAT_MSG_SAY && type != CHAT_MSG_YELL)
             return true;
 
@@ -596,8 +599,11 @@ public:
         return true;
     }
 
-    bool OnPlayerCanUseChat(Player* player, uint32 type, uint32 /*language*/, std::string& msg, Player* receiver) override
+    bool OnPlayerCanUseChat(Player* player, uint32 type, uint32 language, std::string& msg, Player* receiver) override
     {
+        if (language == LANG_ADDON)
+            return true;
+
         if (type != CHAT_MSG_WHISPER || !IsPlayerbot(receiver))
             return true;
 
@@ -607,8 +613,11 @@ public:
         return true;
     }
 
-    bool OnPlayerCanUseChat(Player* player, uint32 type, uint32 /*language*/, std::string& msg, Group* group) override
+    bool OnPlayerCanUseChat(Player* player, uint32 type, uint32 language, std::string& msg, Group* group) override
     {
+        if (language == LANG_ADDON)
+            return true;
+
         if (type != CHAT_MSG_PARTY && type != CHAT_MSG_PARTY_LEADER && type != CHAT_MSG_RAID &&
             type != CHAT_MSG_RAID_LEADER && type != CHAT_MSG_RAID_WARNING)
             return true;

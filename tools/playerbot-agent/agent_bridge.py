@@ -344,6 +344,19 @@ def rule_actions(event: ChatEvent, bot: BotInfo) -> list[Action]:
     def strategy(strategy_text: str, state: str) -> None:
         actions.append(Action("strategy", bot=bot, strategy=strategy_text, bot_state=state))
 
+    if any(token in text for token in ["晚上好", "晚安", "你好", "早上好", "早啊", "hello", "hi"]):
+        if "晚安" in text:
+            say("晚安，明天见")
+        elif "早" in text:
+            say("早，来啦")
+        else:
+            say("晚上好")
+        return actions
+
+    if any(token in text for token in ["在吗", "在不在", "在么"]):
+        say("在呢")
+        return actions
+
     if any(token in text for token in ["跟我", "过来", "跟上", "follow"]):
         command("follow")
         say("跟上了")

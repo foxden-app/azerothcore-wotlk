@@ -38,6 +38,11 @@ class RuleActionTests(unittest.TestCase):
         self.assertEqual(actions[0].action_type, "command")
         self.assertEqual(actions[0].command, "follow")
 
+    def test_greeting_rule(self):
+        actions = agent_bridge.rule_actions(self.event_with("奶妈晚上好"), self.priest)
+        self.assertEqual(actions[0].action_type, "reply")
+        self.assertEqual(actions[0].text, "晚上好")
+
     def test_focus_heal_add_rule(self):
         actions = agent_bridge.rule_actions(self.event_with("小牧加我"), self.priest)
         commands = [action.command for action in actions if action.action_type == "command"]
