@@ -449,11 +449,22 @@ def rule_actions(event: ChatEvent, bot: BotInfo) -> list[Action]:
 
 
 class OpenAICompatibleClient:
-    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 20.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: float = 20.0,
+        *,
+        max_tokens: int = 512,
+        thinking: str = "",
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        self.max_tokens = max_tokens
+        self.thinking = thinking
 
     @classmethod
     def from_env(cls) -> "OpenAICompatibleClient | NullLLM":
@@ -461,18 +472,24 @@ class OpenAICompatibleClient:
         model = os.getenv("PLAYERBOT_AGENT_MODEL", "")
         if not api_key or not model:
             return NullLLM()
+        base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        thinking = os.getenv("PLAYERBOT_AGENT_LLM_THINKING", "").strip().lower()
+        if not thinking and "deepseek" in base_url.lower() and model.startswith("deepseek-v4"):
+            thinking = "disabled"
         return cls(
-            os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            base_url,
             api_key,
             model,
             float(os.getenv("PLAYERBOT_AGENT_LLM_TIMEOUT", "20")),
+            max_tokens=int(os.getenv("PLAYERBOT_AGENT_LLM_MAX_TOKENS", "512")),
+            thinking=thinking,
         )
 
     @property
     def available(self) -> bool:
         return True
 
-    def complete(self, prompt: str) -> str:
+    def request_payload(self, prompt: str) -> dict[str, Any]:
         payload = {
             "model": self.model,
             "messages": [
@@ -484,6 +501,14 @@ class OpenAICompatibleClient:
             ],
             "temperature": 0.2,
         }
+        if self.max_tokens > 0:
+            payload["max_tokens"] = self.max_tokens
+        if self.thinking in {"disabled", "enabled"}:
+            payload["thinking"] = {"type": self.thinking}
+        return payload
+
+    def complete(self, prompt: str) -> str:
+        payload = self.request_payload(prompt)
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),

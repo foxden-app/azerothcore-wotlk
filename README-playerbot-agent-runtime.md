@@ -111,9 +111,13 @@ tmux send-keys -t playerbot-agent C-c
 
 ```bash
 export OPENAI_API_KEY=...
-export OPENAI_BASE_URL=https://api.openai.com/v1
-export PLAYERBOT_AGENT_MODEL=...
+export OPENAI_BASE_URL=https://api.deepseek.com
+export PLAYERBOT_AGENT_MODEL=deepseek-v4-flash
+export PLAYERBOT_AGENT_LLM_THINKING=disabled
+export PLAYERBOT_AGENT_LLM_MAX_TOKENS=512
 ```
+
+DeepSeek V4 Flash 当前建议显式关闭 thinking，避免把输出预算花在思考过程上，导致侧车拿到空 `content`。侧车也会在检测到 `https://api.deepseek.com` + `deepseek-v4*` 时默认补上 `thinking={"type":"disabled"}`。其他 OpenAI-compatible 模型可以不设置 `PLAYERBOT_AGENT_LLM_THINKING`。
 
 没有这些环境变量时，侧车会以规则模式运行，仍支持“跟我、停下、加我、安心奶、捡垃圾”等中文指令。
 

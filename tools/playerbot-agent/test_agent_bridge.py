@@ -63,6 +63,17 @@ class RuleActionTests(unittest.TestCase):
         self.assertEqual(actions[0].strategy, "+loot")
         self.assertEqual(actions[1].command, "ll gray")
 
+    def test_deepseek_payload_disables_thinking(self):
+        client = agent_bridge.OpenAICompatibleClient(
+            "https://api.deepseek.com",
+            "secret",
+            "deepseek-v4-flash",
+            thinking="disabled",
+        )
+        payload = client.request_payload("hi")
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
+        self.assertEqual(payload["max_tokens"], 512)
+
 
 def dataclasses_replace(instance, **changes):
     import dataclasses

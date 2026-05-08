@@ -126,9 +126,13 @@ PLAYERBOT_AGENT_DB_DSN='127.0.0.1;3306;acore;acore;acore_playerbots' \
 
 ```bash
 OPENAI_API_KEY=...
-OPENAI_BASE_URL=https://api.openai.com/v1
-PLAYERBOT_AGENT_MODEL=...
+OPENAI_BASE_URL=https://api.deepseek.com
+PLAYERBOT_AGENT_MODEL=deepseek-v4-flash
+PLAYERBOT_AGENT_LLM_THINKING=disabled
+PLAYERBOT_AGENT_LLM_MAX_TOKENS=512
 ```
+
+当前线上侧车已按 DeepSeek Flash 运行；key 只放在进程环境里，不写入仓库。规则能命中的中文指令优先走规则，其他被点名/密语的闲聊和复杂表达再交给 LLM 输出 JSON，再由 Adapter 翻译成白名单本能动作。
 
 ## 当前可调用本能速查
 

@@ -416,6 +416,17 @@ invite_player(target_player)
 
 限制：v1 只对在线队伍 bot 生效；不让 LLM 自由拼英文命令；召唤/删除/初始化仍由玩家手动 `.playerbots bot ...` 操作。
 
+当前 LLM 运行时使用 OpenAI-compatible Chat Completions。DeepSeek Flash 的推荐配置是：
+
+```text
+OPENAI_BASE_URL=https://api.deepseek.com
+PLAYERBOT_AGENT_MODEL=deepseek-v4-flash
+PLAYERBOT_AGENT_LLM_THINKING=disabled
+PLAYERBOT_AGENT_LLM_MAX_TOKENS=512
+```
+
+运行时 key 只进入进程环境，不进入配置文件或仓库。规则层先处理明确中文指令；LLM 只负责更自然的闲聊、复杂表达和意图归一化，输出仍必须是 Adapter 能验证的 JSON。
+
 第二阶段：更完整 C++ Adapter
 
 ```text
