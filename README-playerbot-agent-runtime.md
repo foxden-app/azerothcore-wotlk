@@ -75,6 +75,21 @@ tail -n 80 env/dist/logs/Playerbots.log
 python3 tools/playerbot-agent/agent_bridge.py --once --rule-only
 ```
 
+跟踪 LLM 和 skill 调用：
+
+```bash
+tail -f env/dist/logs/playerbot-agent.log
+tail -f env/dist/logs/Server.log | rg 'module.playerbot_agent|Playerbot Agent'
+
+mysql -h127.0.0.1 -P3306 -uacore -pacore --default-character-set=utf8mb4 acore_playerbots \
+  -e "SELECT id, created_at, channel, speaker_name, bot_name, message, LEFT(meta, 1200) AS meta FROM agent_playerbot_events ORDER BY id DESC LIMIT 5\\G"
+
+mysql -h127.0.0.1 -P3306 -uacore -pacore --default-character-set=utf8mb4 acore_playerbots \
+  -e "SELECT id, source_event_id, status, bot_name, action_type, channel, text, command, strategy, bot_state, result, error FROM agent_playerbot_actions ORDER BY id DESC LIMIT 20\\G"
+```
+
+`playerbot-agent.log` 是大脑侧日志，会记录 `chat_event`、`llm_prompt`、`llm_response`、`llm_skill_mapping`、`decision`、`action_enqueued`。`Server.log` 是小脑执行日志，会记录动作是否执行成 `done`，或被权限/白名单挡成 `error`。数据库里的 `agent_playerbot_actions.status/result/error` 是最终真相源。
+
 进入 worldserver 控制台：
 
 ```bash
@@ -115,6 +130,8 @@ export OPENAI_BASE_URL=https://api.deepseek.com
 export PLAYERBOT_AGENT_MODEL=deepseek-v4-flash
 export PLAYERBOT_AGENT_LLM_THINKING=disabled
 export PLAYERBOT_AGENT_LLM_MAX_TOKENS=512
+export PLAYERBOT_AGENT_TRACE=1
+export PLAYERBOT_AGENT_TRACE_PROMPT=1
 ```
 
 DeepSeek V4 Flash 当前建议显式关闭 thinking，避免把输出预算花在思考过程上，导致侧车拿到空 `content`。侧车也会在检测到 `https://api.deepseek.com` + `deepseek-v4*` 时默认补上 `thinking={"type":"disabled"}`。其他 OpenAI-compatible 模型可以不设置 `PLAYERBOT_AGENT_LLM_THINKING`。

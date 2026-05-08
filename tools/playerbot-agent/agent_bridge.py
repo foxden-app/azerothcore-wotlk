@@ -20,6 +20,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -69,6 +70,7 @@ class ChatEvent:
     bot_name: str | None
     message: str
     bots: list[BotInfo]
+    context: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -80,6 +82,40 @@ class Action:
     command: str | None = None
     strategy: str | None = None
     bot_state: str | None = None
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def truncate(value: Any, limit: int = 4000) -> Any:
+    if isinstance(value, str) and len(value) > limit:
+        return value[:limit] + f"...<truncated {len(value) - limit} chars>"
+    return value
+
+
+def log_agent(event: str, **fields: Any) -> None:
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        "event": event,
+        **{key: truncate(value) for key, value in fields.items()},
+    }
+    print(json.dumps(record, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+
+def action_to_dict(action: Action) -> dict[str, Any]:
+    return {
+        "type": action.action_type,
+        "bot": action.bot.name,
+        "channel": action.channel,
+        "text": action.text,
+        "command": action.command,
+        "strategy": action.strategy,
+        "bot_state": action.bot_state,
+    }
 
 
 class MysqlCli:
@@ -186,6 +222,18 @@ class AgentBridge:
         self.history: deque[tuple[float, str, str, str]] = deque(maxlen=RECENT_MESSAGE_LIMIT)
         self.last_id = self._load_last_id(replay)
         self.llm = OpenAICompatibleClient.from_env()
+        self.trace = env_bool("PLAYERBOT_AGENT_TRACE", False)
+        self.trace_prompt = env_bool("PLAYERBOT_AGENT_TRACE_PROMPT", self.trace)
+        log_agent(
+            "startup",
+            rule_only=self.rule_only,
+            llm_available=self.llm.available,
+            llm_model=getattr(self.llm, "model", ""),
+            llm_base_url=getattr(self.llm, "base_url", ""),
+            llm_thinking=getattr(self.llm, "thinking", ""),
+            last_id=self.last_id,
+            poll_limit=self.poll_limit,
+        )
 
     def _load_last_id(self, replay: bool) -> int:
         if replay:
@@ -248,6 +296,7 @@ class AgentBridge:
                     bot_name=str(row[7]) if row[7] else None,
                     message=decode_b64(row[8]),
                     bots=bots,
+                    context=payload,
                 )
             )
         return events
@@ -255,13 +304,37 @@ class AgentBridge:
     def handle_event(self, event: ChatEvent) -> None:
         now = time.time()
         self._remember(event, now)
+        log_agent(
+            "chat_event",
+            event_id=event.id,
+            channel=event.channel,
+            speaker=event.speaker_name,
+            target=event.target_name,
+            bot_names=[bot.name for bot in event.bots],
+            message=event.message,
+            context=event.context if self.trace else None,
+        )
         for bot in event.bots:
             if not self._is_for_bot(event, bot, now):
+                if self.trace:
+                    log_agent("attention_skip", event_id=event.id, bot=bot.name)
                 continue
 
             actions = rule_actions(event, bot)
+            source = "rule" if actions else ""
             if not actions and not self.rule_only and self.llm.available:
                 actions = self.llm_actions(event, bot)
+                source = "llm" if actions else "llm_empty"
+            elif not actions:
+                source = "no_action"
+
+            log_agent(
+                "decision",
+                event_id=event.id,
+                bot=bot.name,
+                source=source,
+                actions=[action_to_dict(action) for action in actions],
+            )
 
             for action in actions:
                 self.enqueue_action(event, action)
@@ -283,14 +356,30 @@ class AgentBridge:
         return event.channel in {"party", "raid", "say", "yell"} and self.attention_until[bot.guid] > now
 
     def llm_actions(self, event: ChatEvent, bot: BotInfo) -> list[Action]:
-        response = self.llm.complete(build_prompt(event, bot, self.history))
+        prompt = build_prompt(event, bot, self.history)
+        if self.trace_prompt:
+            log_agent("llm_prompt", event_id=event.id, bot=bot.name, prompt=prompt)
+
+        started = time.monotonic()
+        response = self.llm.complete(prompt)
+        latency_ms = int((time.monotonic() - started) * 1000)
+        log_agent("llm_response", event_id=event.id, bot=bot.name, latency_ms=latency_ms, response=response)
         if not response:
             return []
         try:
             payload = json.loads(response)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            log_agent("llm_json_error", event_id=event.id, bot=bot.name, error=str(exc), response=response)
             return []
-        return actions_from_llm_payload(payload, event, bot)
+        actions = actions_from_llm_payload(payload, event, bot)
+        log_agent(
+            "llm_skill_mapping",
+            event_id=event.id,
+            bot=bot.name,
+            requested_skills=payload.get("actions", []),
+            mapped_actions=[action_to_dict(action) for action in actions],
+        )
+        return actions
 
     def enqueue_action(self, event: ChatEvent, action: Action) -> None:
         sql = (
@@ -303,6 +392,7 @@ class AgentBridge:
             f"{sql_quote(action.strategy)}, {sql_quote(action.bot_state)})"
         )
         self.db.execute(sql)
+        log_agent("action_enqueued", event_id=event.id, action=action_to_dict(action))
 
 
 def decode_b64(value: str | None) -> str:
@@ -521,7 +611,8 @@ class OpenAICompatibleClient:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            log_agent("llm_error", error=f"{type(exc).__name__}: {exc}", base_url=self.base_url, model=self.model)
             return ""
         return str(data.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
 
@@ -545,6 +636,7 @@ def build_prompt(event: ChatEvent, bot: BotInfo, history: Iterable[tuple[float, 
             "speaker": event.speaker_name,
             "message": event.message,
         },
+        "world_context": event.context,
         "recent_messages": recent[-20:],
         "available_skills": [
             "reply",

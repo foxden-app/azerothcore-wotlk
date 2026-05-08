@@ -7,8 +7,12 @@
  */
 
 #include "Chat.h"
+#include "CellImpl.h"
 #include "Config.h"
+#include "Creature.h"
 #include "DatabaseEnv.h"
+#include "GridNotifiers.h"
+#include "GridNotifiersImpl.h"
 #include "Group.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
@@ -23,7 +27,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <iomanip>
+#include <list>
 #include <map>
 #include <sstream>
 #include <string>
@@ -36,6 +42,9 @@ bool SchemaReady = false;
 uint32 ActionPollIntervalMs = 500;
 uint32 ActionPollElapsedMs = 0;
 uint32 MaxReplyLength = 220;
+bool TraceLog = true;
+float ContextRange = 45.0f;
+uint32 MaxNearbyHostiles = 8;
 
 std::string ToLowerAscii(std::string value)
 {
@@ -118,7 +127,39 @@ struct BotSnapshot
     uint8 playerClass = 0;
     uint8 level = 0;
     std::string role;
+    float healthPct = 0.0f;
+    uint32 manaPct = 0;
+    bool alive = false;
+    bool combat = false;
+    bool hasDistance = false;
+    float distance = 0.0f;
+    uint32 mapId = 0;
+    uint32 zoneId = 0;
+    uint32 areaId = 0;
+    std::string targetName;
+    bool targetHostile = false;
+    bool hasTargetDistance = false;
+    float targetDistance = 0.0f;
 };
+
+std::string FloatString(float value)
+{
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(1) << value;
+    return out.str();
+}
+
+uint32 ManaPct(Unit* unit)
+{
+    if (!unit)
+        return 0;
+
+    uint32 maxMana = unit->GetMaxPower(POWER_MANA);
+    if (!maxMana)
+        return 0;
+
+    return static_cast<uint32>(std::round(100.0f * static_cast<float>(unit->GetPower(POWER_MANA)) / static_cast<float>(maxMana)));
+}
 
 bool IsRealPlayer(Player* player)
 {
@@ -144,7 +185,7 @@ std::string DetectRole(Player* bot)
     return "dps";
 }
 
-BotSnapshot MakeSnapshot(Player* bot)
+BotSnapshot MakeSnapshot(Player* bot, Player* reference = nullptr)
 {
     BotSnapshot snapshot;
     snapshot.guid = bot->GetGUID().GetCounter();
@@ -152,10 +193,35 @@ BotSnapshot MakeSnapshot(Player* bot)
     snapshot.playerClass = bot->getClass();
     snapshot.level = bot->GetLevel();
     snapshot.role = DetectRole(bot);
+    snapshot.healthPct = bot->GetHealthPct();
+    snapshot.manaPct = ManaPct(bot);
+    snapshot.alive = bot->IsAlive();
+    snapshot.combat = bot->IsInCombat();
+    snapshot.mapId = bot->GetMapId();
+    snapshot.zoneId = bot->GetZoneId();
+    snapshot.areaId = bot->GetAreaId();
+
+    if (reference && reference->IsInMap(bot))
+    {
+        snapshot.hasDistance = true;
+        snapshot.distance = reference->GetDistance(bot);
+    }
+
+    if (Unit* target = bot->GetVictim())
+    {
+        snapshot.targetName = target->GetName();
+        snapshot.targetHostile = target->IsHostileTo(bot);
+        if (bot->IsInMap(target))
+        {
+            snapshot.hasTargetDistance = true;
+            snapshot.targetDistance = bot->GetDistance(target);
+        }
+    }
+
     return snapshot;
 }
 
-void AddUniqueBot(std::vector<BotSnapshot>& bots, Player* bot)
+void AddUniqueBot(std::vector<BotSnapshot>& bots, Player* bot, Player* reference = nullptr)
 {
     if (!IsPlayerbot(bot))
         return;
@@ -167,10 +233,10 @@ void AddUniqueBot(std::vector<BotSnapshot>& bots, Player* bot)
     });
 
     if (existing == bots.end())
-        bots.push_back(MakeSnapshot(bot));
+        bots.push_back(MakeSnapshot(bot, reference));
 }
 
-std::vector<BotSnapshot> GetGroupBots(Group* group)
+std::vector<BotSnapshot> GetGroupBots(Group* group, Player* reference)
 {
     std::vector<BotSnapshot> bots;
     if (!group)
@@ -179,7 +245,7 @@ std::vector<BotSnapshot> GetGroupBots(Group* group)
     for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
     {
         if (Player* member = itr->GetSource())
-            AddUniqueBot(bots, member);
+            AddUniqueBot(bots, member, reference);
     }
 
     return bots;
@@ -194,16 +260,140 @@ std::vector<BotSnapshot> GetOwnedBots(Player* master)
     if (PlayerbotMgr* mgr = GET_PLAYERBOT_MGR(master))
     {
         for (PlayerBotMap::const_iterator itr = mgr->GetPlayerBotsBegin(); itr != mgr->GetPlayerBotsEnd(); ++itr)
-            AddUniqueBot(bots, itr->second);
+            AddUniqueBot(bots, itr->second, master);
     }
 
     return bots;
 }
 
-std::string BotsToJson(std::vector<BotSnapshot> const& bots)
+std::string TargetToJson(Unit* target, Unit* reference)
+{
+    if (!target)
+        return "null";
+
+    std::ostringstream out;
+    out << "{\"guid\":" << target->GetGUID().GetCounter()
+        << ",\"name\":\"" << JsonEscape(target->GetName()) << "\""
+        << ",\"type\":\"" << (target->IsPlayer() ? "player" : (target->IsCreature() ? "creature" : "unit")) << "\""
+        << ",\"entry\":" << target->GetEntry()
+        << ",\"level\":" << static_cast<uint32>(target->GetLevel())
+        << ",\"health_pct\":" << FloatString(target->GetHealthPct())
+        << ",\"alive\":" << (target->IsAlive() ? "true" : "false")
+        << ",\"combat\":" << (target->IsInCombat() ? "true" : "false");
+
+    if (reference && reference->IsInMap(target))
+        out << ",\"distance\":" << FloatString(reference->GetDistance(target))
+            << ",\"hostile_to_reference\":" << (target->IsHostileTo(reference) ? "true" : "false");
+
+    out << "}";
+    return out.str();
+}
+
+std::string PlayerContextToJson(Player* player, Player* reference)
+{
+    if (!player)
+        return "null";
+
+    std::ostringstream out;
+    out << "{\"guid\":" << player->GetGUID().GetCounter()
+        << ",\"name\":\"" << JsonEscape(player->GetName()) << "\""
+        << ",\"is_bot\":" << (IsPlayerbot(player) ? "true" : "false")
+        << ",\"class\":" << static_cast<uint32>(player->getClass())
+        << ",\"level\":" << static_cast<uint32>(player->GetLevel())
+        << ",\"role\":\"" << JsonEscape(IsPlayerbot(player) ? DetectRole(player) : "player") << "\""
+        << ",\"health_pct\":" << FloatString(player->GetHealthPct())
+        << ",\"mana_pct\":" << ManaPct(player)
+        << ",\"alive\":" << (player->IsAlive() ? "true" : "false")
+        << ",\"combat\":" << (player->IsInCombat() ? "true" : "false")
+        << ",\"map_id\":" << player->GetMapId()
+        << ",\"zone_id\":" << player->GetZoneId()
+        << ",\"area_id\":" << player->GetAreaId();
+
+    if (reference && reference != player && reference->IsInMap(player))
+        out << ",\"distance\":" << FloatString(reference->GetDistance(player));
+
+    out << ",\"selected_target\":" << TargetToJson(player->GetSelectedUnit(), player)
+        << ",\"combat_target\":" << TargetToJson(player->GetVictim(), player)
+        << "}";
+    return out.str();
+}
+
+std::string GroupMembersToJson(Player* speaker, Group* group)
 {
     std::ostringstream out;
-    out << "{\"bots\":[";
+    out << "[";
+    bool first = true;
+
+    if (group)
+    {
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* member = itr->GetSource();
+            if (!member)
+                continue;
+
+            if (!first)
+                out << ",";
+            first = false;
+            out << PlayerContextToJson(member, speaker);
+        }
+    }
+    else if (speaker)
+    {
+        out << PlayerContextToJson(speaker, speaker);
+    }
+
+    out << "]";
+    return out.str();
+}
+
+std::string NearbyHostilesToJson(Player* speaker)
+{
+    std::ostringstream out;
+    out << "[";
+    if (!speaker || ContextRange <= 0.0f || !MaxNearbyHostiles)
+    {
+        out << "]";
+        return out.str();
+    }
+
+    std::list<Unit*> targets;
+    Acore::AnyUnfriendlyUnitInObjectRangeCheck check(speaker, speaker, ContextRange);
+    Acore::UnitListSearcher<Acore::AnyUnfriendlyUnitInObjectRangeCheck> searcher(speaker, targets, check);
+    Cell::VisitObjects(speaker, searcher, ContextRange);
+
+    targets.remove_if([speaker](Unit* unit)
+    {
+        return !unit || !unit->IsInWorld() || unit->IsDuringRemoveFromWorld() || !unit->IsAlive() ||
+               unit->IsPlayer() || !speaker->IsInMap(unit) || !unit->IsHostileTo(speaker);
+    });
+
+    targets.sort([speaker](Unit* left, Unit* right)
+    {
+        return speaker->GetDistance(left) < speaker->GetDistance(right);
+    });
+
+    uint32 count = 0;
+    for (Unit* target : targets)
+    {
+        if (count >= MaxNearbyHostiles)
+            break;
+
+        if (count)
+            out << ",";
+
+        out << TargetToJson(target, speaker);
+        ++count;
+    }
+
+    out << "]";
+    return out.str();
+}
+
+std::string BotSnapshotsToJson(std::vector<BotSnapshot> const& bots)
+{
+    std::ostringstream out;
+    out << "[";
 
     for (std::size_t i = 0; i < bots.size(); ++i)
     {
@@ -215,10 +405,48 @@ std::string BotsToJson(std::vector<BotSnapshot> const& bots)
             << ",\"name\":\"" << JsonEscape(bot.name) << "\""
             << ",\"class\":" << static_cast<uint32>(bot.playerClass)
             << ",\"level\":" << static_cast<uint32>(bot.level)
-            << ",\"role\":\"" << JsonEscape(bot.role) << "\"}";
+            << ",\"role\":\"" << JsonEscape(bot.role) << "\""
+            << ",\"health_pct\":" << FloatString(bot.healthPct)
+            << ",\"mana_pct\":" << bot.manaPct
+            << ",\"alive\":" << (bot.alive ? "true" : "false")
+            << ",\"combat\":" << (bot.combat ? "true" : "false")
+            << ",\"map_id\":" << bot.mapId
+            << ",\"zone_id\":" << bot.zoneId
+            << ",\"area_id\":" << bot.areaId;
+
+        if (bot.hasDistance)
+            out << ",\"distance_to_speaker\":" << FloatString(bot.distance);
+
+        if (!bot.targetName.empty())
+        {
+            out << ",\"combat_target\":{\"name\":\"" << JsonEscape(bot.targetName) << "\""
+                << ",\"hostile\":" << (bot.targetHostile ? "true" : "false");
+            if (bot.hasTargetDistance)
+                out << ",\"distance\":" << FloatString(bot.targetDistance);
+            out << "}";
+        }
+
+        out << "}";
     }
 
-    out << "]}";
+    out << "]";
+    return out.str();
+}
+
+std::string EventMetaToJson(Player* speaker, Group* group, std::vector<BotSnapshot> const& bots)
+{
+    std::ostringstream out;
+    out << "{\"speaker\":" << PlayerContextToJson(speaker, speaker)
+        << ",\"environment\":{"
+        << "\"map_id\":" << (speaker ? speaker->GetMapId() : 0)
+        << ",\"zone_id\":" << (speaker ? speaker->GetZoneId() : 0)
+        << ",\"area_id\":" << (speaker ? speaker->GetAreaId() : 0)
+        << ",\"selected_target\":" << (speaker ? TargetToJson(speaker->GetSelectedUnit(), speaker) : "null")
+        << ",\"combat_target\":" << (speaker ? TargetToJson(speaker->GetVictim(), speaker) : "null")
+        << ",\"nearby_hostiles\":" << NearbyHostilesToJson(speaker)
+        << "},\"group_members\":" << GroupMembersToJson(speaker, group)
+        << ",\"bots\":" << BotSnapshotsToJson(bots)
+        << "}";
     return out.str();
 }
 
@@ -288,7 +516,11 @@ void InsertChatEvent(Player* speaker, std::string const& channel, uint32 chatTyp
     uint32 botGuid = targetBot ? targetBot->GetGUID().GetCounter() : 0;
     std::string botName = targetBot ? targetBot->GetName() : "";
     uint32 accountId = speaker->GetSession() ? speaker->GetSession()->GetAccountId() : 0;
-    std::string meta = BotsToJson(bots);
+    std::string meta = EventMetaToJson(speaker, group, bots);
+
+    if (TraceLog)
+        LOG_INFO("module.playerbot_agent", "Queued chat event channel={} speaker={} target={} bots={} message={}",
+                 channel, speaker->GetName(), targetName, bots.size(), message);
 
     PlayerbotsDatabase.Execute(
         "INSERT INTO `agent_playerbot_events` "
@@ -462,12 +694,21 @@ void CompleteAction(uint64 actionId, bool success, std::string const& result, st
         "UPDATE `agent_playerbot_actions` SET `status` = {}, `updated_at` = NOW(), `result` = {}, `error` = {} "
         "WHERE `id` = {}",
         SqlQuote(success ? "done" : "error"), SqlNullableQuote(result), SqlNullableQuote(error), actionId);
+
+    if (TraceLog)
+        LOG_INFO("module.playerbot_agent", "Action {} {} result={} error={}", actionId,
+                 success ? "done" : "error", result, error);
 }
 
 void ProcessAction(uint64 actionId, uint32 requesterGuid, std::string const& botName, uint32 botGuid,
                    std::string const& actionType, std::string const& channel, std::string const& text,
                    std::string const& command, std::string const& strategy, std::string const& botState)
 {
+    if (TraceLog)
+        LOG_INFO("module.playerbot_agent",
+                 "Executing action {} type={} bot={}({}) channel={} command={} strategy={} bot_state={} text={}",
+                 actionId, actionType, botName, botGuid, channel, command, strategy, botState, text);
+
     Player* requester = ObjectAccessor::FindPlayer(ObjectGuid::Create<HighGuid::Player>(requesterGuid));
     if (!requester)
     {
@@ -608,7 +849,7 @@ public:
             return true;
 
         std::vector<BotSnapshot> bots;
-        AddUniqueBot(bots, receiver);
+        AddUniqueBot(bots, receiver, player);
         InsertChatEvent(player, "whisper", type, msg, receiver, receiver ? receiver->GetGroup() : nullptr, bots);
         return true;
     }
@@ -622,7 +863,7 @@ public:
             type != CHAT_MSG_RAID_LEADER && type != CHAT_MSG_RAID_WARNING)
             return true;
 
-        std::vector<BotSnapshot> bots = GetGroupBots(group);
+        std::vector<BotSnapshot> bots = GetGroupBots(group, player);
         std::string channel = (type == CHAT_MSG_RAID || type == CHAT_MSG_RAID_LEADER || type == CHAT_MSG_RAID_WARNING)
             ? "raid"
             : "party";
@@ -648,6 +889,9 @@ public:
         AgentEnabled = sConfigMgr->GetOption<bool>("AgentPlayerbot.Enabled", true);
         ActionPollIntervalMs = sConfigMgr->GetOption<uint32>("AgentPlayerbot.ActionPollIntervalMs", 500);
         MaxReplyLength = sConfigMgr->GetOption<uint32>("AgentPlayerbot.MaxReplyLength", 220);
+        TraceLog = sConfigMgr->GetOption<bool>("AgentPlayerbot.TraceLog", true);
+        ContextRange = sConfigMgr->GetOption<float>("AgentPlayerbot.ContextRange", 45.0f);
+        MaxNearbyHostiles = sConfigMgr->GetOption<uint32>("AgentPlayerbot.MaxNearbyHostiles", 8);
 
         if (!AgentEnabled)
         {
@@ -656,8 +900,9 @@ public:
         }
 
         EnsureSchema();
-        LOG_INFO("module.playerbot_agent", "Playerbot Agent bridge enabled; action poll interval {} ms",
-                 ActionPollIntervalMs);
+        LOG_INFO("module.playerbot_agent",
+                 "Playerbot Agent bridge enabled; action poll interval {} ms, trace={}, context range={}, max hostiles={}",
+                 ActionPollIntervalMs, TraceLog ? "on" : "off", ContextRange, MaxNearbyHostiles);
     }
 
     void OnUpdate(uint32 diff) override

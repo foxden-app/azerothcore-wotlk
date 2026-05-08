@@ -134,6 +134,17 @@ PLAYERBOT_AGENT_LLM_MAX_TOKENS=512
 
 当前线上侧车已按 DeepSeek Flash 运行；key 只放在进程环境里，不写入仓库。规则能命中的中文指令优先走规则，其他被点名/密语的闲聊和复杂表达再交给 LLM 输出 JSON，再由 Adapter 翻译成白名单本能动作。
 
+调试时看三处：
+
+```bash
+tail -f env/dist/logs/playerbot-agent.log
+tail -f env/dist/logs/Server.log | rg 'module.playerbot_agent|Playerbot Agent'
+mysql -h127.0.0.1 -P3306 -uacore -pacore --default-character-set=utf8mb4 acore_playerbots \
+  -e "SELECT id, source_event_id, status, bot_name, action_type, channel, text, command, strategy, bot_state, result, error FROM agent_playerbot_actions ORDER BY id DESC LIMIT 20\\G"
+```
+
+`playerbot-agent.log` 能看到大模型 prompt、响应、skill 映射和入队动作；`Server.log` 能看到 C++ 桥是否真正执行；`agent_playerbot_actions` 的 `status/result/error` 是最终真相源。
+
 ## 当前可调用本能速查
 
 完整能力矩阵见：[ARCHITECTURE-agent-playerbots.md](/home/wuya/git/azerothcore-wotlk-git/ARCHITECTURE-agent-playerbots.md) 的“Playerbots 提供的本能”。

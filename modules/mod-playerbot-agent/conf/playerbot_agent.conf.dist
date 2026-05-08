@@ -11,3 +11,10 @@ AgentPlayerbot.ActionPollIntervalMs = 500
 
 # Hard cap for text sent by the bridge as bot chat.
 AgentPlayerbot.MaxReplyLength = 220
+
+# Emit chat/action trace lines to Server.log under module.playerbot_agent.
+AgentPlayerbot.TraceLog = 1
+
+# Runtime context attached to each queued chat event for the Python LLM sidecar.
+AgentPlayerbot.ContextRange = 45
+AgentPlayerbot.MaxNearbyHostiles = 8
