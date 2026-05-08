@@ -56,6 +56,9 @@ population:
 - `MapUpdateInterval = 50`
 - `MapUpdate.Threads = 1`
 
+Random bot autologin is intentionally disabled. The runtime is configured as
+an Agent-controlled bot pool, not as a full ambient random-bot world.
+
 The bot account prefix is `pbagent`. The initial database contains 55 bot
 accounts and 550 generated bot characters, with 50 accounts assigned to the
 AddClass pool for quick party creation.
@@ -89,3 +92,18 @@ Start from outside tmux:
 tmux new-session -d -s playerbot-world \
   "cd /home/wuya/git/azerothcore-wotlk-git/env/dist/bin && exec ./worldserver --config /home/wuya/git/azerothcore-wotlk-git/env/dist/etc/worldserver.conf >> /home/wuya/git/azerothcore-wotlk-git/env/dist/logs/worldserver.playerbot.stdout.log 2>&1"
 ```
+
+## Host Resources
+
+Swap was expanded on 2026-05-08 by adding:
+
+```text
+/swap-playerbot.img  12G
+```
+
+The original `/swap.img` remains in place, so total swap is now about 16G.
+The new swap file is persisted in `/etc/fstab`.
+
+Current major memory consumers are normally the PlayerBot `worldserver`,
+VS Code server, and MySQL. FRP, foxden, and foxhole-postgres are lightweight
+relative to the PlayerBot server.
