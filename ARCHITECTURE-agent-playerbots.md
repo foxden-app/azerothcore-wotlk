@@ -121,53 +121,136 @@ AddClass 账号池:   50
 
 ## Playerbots 提供的本能
 
-这里的“本能”指不需要 LLM 每一步判断、已经由 Playerbots/C++ 规则系统高频处理的能力。
+这里的“本能”指不需要 LLM 每一步判断、已经由 Playerbots/C++ 规则系统高频处理的能力。当前清单主要来自 `PlayerbotMgr`、`RandomPlayerbotMgr`、`ChatCommandHandlerStrategy` 和 `AiFactory`。不是模块里的所有命令都应暴露给 LLM。本文档用四个等级描述可调用程度：
 
-### 角色创建和召唤
+| 等级 | 含义 | Agent 侧处理 |
+| --- | --- | --- |
+| L1 | 当前已经能通过 `.playerbots` 命令桥或 SOAP 间接调用 | 可以先包装成 Intent Adapter |
+| L2 | bot 上线后自动生效的策略/行为树本能 | 上层通过职业、初始化、队伍目标和策略调参间接控制 |
+| L3 | 底层已有聊天快捷命令、Action 或 C++ 能力，但还没有安全强类型 API | 需要 Adapter 包装，不能让 LLM 直接拼命令 |
+| L4 | 模块支持但当前配置关闭，或只适合 GM/维护 | 默认不暴露给 LLM |
 
-- `AddClass`：按职业快速召唤一个已生成 bot。
-- `Altbot`：玩家账号上的其他角色可以作为 bot 登录。
-- `Randombot`：随机 bot 自动上线、游荡、升级、做任务、进队、进 BG。当前为节省资源已关闭。
-- 机器人登录/登出、列出、初始化、刷新、升级、装备初始化。
+### L1：当前可直接包装的命令桥本能
 
-### 职业战斗
+这些能力已经能从游戏内 `.playerbots bot ...` 使用，也可以由服务端通过 SOAP 代执行。第一版 Agent Adapter 应优先只包装这些低风险能力。
 
-- 各职业基础 DPS/坦克/治疗循环。
-- 近战/远程站位、攻击距离、施法距离、治疗距离。
-- 治疗、驱散、BUFF、保命、宠物相关行为。
-- 副本/团队中应用实例策略。
-- 治疗职业省蓝策略、低血/低蓝阈值。
+| Agent intent | 当前 Playerbots 小脑语言 | 说明 |
+| --- | --- | --- |
+| `lookup_bot_pool` | `.playerbots bot lookup` | 查看 AddClass 池中可召唤 bot。 |
+| `summon_bot` | `.playerbots bot addclass <class> [male\|female\|0\|1]` | 从 AddClass 池按职业召唤同阵营 bot。职业参数：`warrior`、`paladin`、`hunter`、`rogue`、`priest`、`shaman`、`mage`、`warlock`、`druid`、`dk`。 |
+| `list_bots` | `.playerbots bot list` | 列出当前玩家可控 bot。 |
+| `dismiss_bot` | `.playerbots bot remove <name>`，别名 `logout`、`rm` | 让指定 bot 下线。`*` 可作用于队伍内 bot，但 Adapter 应做权限和确认。 |
+| `login_account_bot` | `.playerbots bot add <charname>` | 登录玩家自己账号或可信账号上的指定角色作为 bot。 |
+| `login_account_bots` | `.playerbots bot addaccount <account-or-char>` | 登录指定账号下角色。需要账号/可信账号权限，默认不作为第一批开放能力。 |
+| `init_bot` | `.playerbots bot init=auto <name>` | 给 AddClass bot 按主人等级和装备分数初始化装备。非 GM 受 `autoInitOnly` 影响时应只用 `init=auto`。 |
+| `init_bot_quality` | `.playerbots bot init=green/blue/epic/legendary <name>` | 按品质初始化装备。别名包括 `white/common`、`green/uncommon`、`blue/rare`、`epic/purple`、`legendary/yellow`。建议只给 GM Adapter 暴露。 |
+| `init_bot_gearscore` | `.playerbots bot init=<gearScore> <name>` | 按 gear score 上限初始化装备。建议只给 GM Adapter 暴露。 |
+| `refresh_bot` | `.playerbots bot refresh <name>` | 刷新 AddClass bot 装备/状态。 |
+| `refresh_bot_raid_lock` | `.playerbots bot refresh=raid <name>` | 解除副本绑定相关状态。源码里标注该能力还不完美，默认不作为常规玩家能力。 |
+| `level_bot` | `.playerbots bot levelup <name>`，别名 `level` | 让 AddClass bot 跟随等级初始化。 |
+| `init_instance_quests` | `.playerbots bot quests <name>` | 初始化副本任务。 |
+| `reload_playerbot_config` | `.playerbots bot reload` | 重新读取 Playerbots 配置。GM/运维能力，不给普通 LLM 调用。 |
+| `toggle_selfbot` | `.playerbots bot self` | 给真人角色启用/关闭 bot AI。调试能力，不作为常规 Agent 能力。 |
 
-### 移动和战斗安全
+### L2：上线后自动运行的核心本能
 
-- 跟随、召唤到队长附近。
-- 逃跑和脱离危险距离。
-- 自动躲避部分 AOE。
-- 坐骑、飞行点、移动延迟。
-- 地图路径和目的地缓存。
+这些能力不需要上层逐条调用。只要 bot 被召唤、初始化并跟随主人，Playerbots 会在战斗/非战斗/死亡状态下自动选择动作。
 
-### 队伍、副本、PVP
+| 类别 | 已存在的本能 | 上层大脑如何调控 |
+| --- | --- | --- |
+| 职业战斗循环 | 全职业基础输出、治疗、坦克、驱散、控制、AOE、爆发、施法距离、攻击距离、站位 | 主要通过 `summon_bot` 的职业选择、初始化质量、队伍组成和后续 `set_strategy` 控制。 |
+| 坦克行为 | `tank`、`tank assist`、`pull`、`pull back`、`tank face`、威胁/拉怪相关策略 | 大脑决定“需要坦克”“让坦克开怪/停手”，小脑处理具体技能和仇恨。 |
+| 治疗行为 | `heal`、`holy heal`、`cure`、`save mana`、`healer dps`、低血/低蓝阈值 | 大脑决定是否召治疗、是否进入休整，小脑持续治疗、驱散、省蓝。 |
+| DPS 行为 | `dps`、`dps assist`、各职业专精、`behind`、`boost`、`max dps` 相关策略 | 大脑决定集火目标、是否爆发，小脑负责技能循环。 |
+| 非战斗跟随 | `follow`、`formation`、`stay`、回到主人、距离控制 | 大脑只表达“跟我/停在这/散开”，小脑处理移动。 |
+| 战斗安全 | `avoid aoe`、`flee`、`runaway`、药水、食物/喝水、复活/死亡跟随 | 大脑不用逐秒躲技能，只决定是否撤退、休整、复活。 |
+| Buff 和宠物 | 职业 Buff、图腾/祝福/法师护甲、猎人/术士宠物、死亡骑士/猎人等职业资源 | 大脑不调单个 Buff，最多设置队伍目标或角色定位。 |
+| 拾取和物品 | `loot`、ROLL、开箱/开锁、装备/卸装、自动装备升级、包裹补给 | 大脑可以决定“允许拾取/卖垃圾/准备副本”，小脑处理细节。 |
+| 任务和成长 | 接/交/共享任务、任务同步、自动任务/RPG、清理过期任务 | 大脑负责宏观任务选择，小脑执行 NPC 交互和移动。 |
+| 移动和旅行 | 坐骑、飞行点、旅行目的地缓存、寻路、召唤到主人附近 | 大脑说目标，小脑处理怎么走。 |
+| 副本/团队 | `ApplyInstanceStrategies`、副本和团队 Boss 专用触发器/动作、队伍职责 | 大脑负责组队和目标，小脑负责 Boss 技能应对。 |
+| BG/竞技场 | 战场策略、竞技场策略、战场目标移动 | 当前随机 bot 自动进 BG 已关闭，后续只在明确测试时打开。 |
 
-- 组队和团队相关操作。
-- LFG/BG/竞技场相关随机 bot 行为。
-- 部分副本和团队 Boss 策略。
-- AddClass 快速组建坦克/治疗/DPS 小队。
+职业策略已经覆盖 WotLK 十职业，常见策略名包括：
 
-### 角色成长和后勤
+```text
+priest:  dps, shadow debuff, shadow aoe, heal, holy heal, cure
+mage:    arcane, fire, frost, frostfire, dps, cc, aoe, cure
+warrior: tank, tank assist, pull, pull back, arms, fury, aoe
+shaman:  ele, resto, enh, cure, aoe, totem/buff strategies
+paladin: tank, heal, dps, cure, blessings, aoe
+druid:   caster, caster aoe, caster debuff, heal, cat, bear, cure
+hunter:  bm, mm, surv, cc, dps assist, aoe, pet/bdps
+rogue:   melee, dps, dps assist, aoe
+warlock: affli, demo, destro, curse, cc, aoe, pet
+dk:      blood, frost, unholy, tank assist, pull, aoe
+```
 
-- 任务同步、自动做任务/RPG 行为。
-- 拾取、ROLL 点、自动装备升级。
-- maintenance：学习技能、补给、修理、天赋、雕文、附魔、宝石、宠物等。
-- 装备缓存、随机物品缓存、附魔/宝石缓存。
+### L3：底层已有但需要 Adapter 包装的可控本能
 
-### 社交和经济
+这些动作在 Playerbots 中已经有聊天快捷命令、Action 或策略变化入口，但当前还没有我们自己的强类型、安全边界和中文理解层。它们可以作为第二批 Adapter API。
 
-- bot 聊天文本库。
-- 交易相关行为。
-- 公会任务/随机 guild 行为。
-- 世界/公会/交易/LFG 频道广播概率。
+| 目标能力 | 底层入口 | 建议 Adapter 形态 |
+| --- | --- | --- |
+| 让 bot 跟随 | bot 聊天快捷命令 `follow` | `bot_follow(bot, target=master)` |
+| 让 bot 原地停留 | `stay` | `bot_stay(bot, position=current)` |
+| 让 bot 远离/散开 | `move from group`、`flee`、`runaway`、`warning`、`disperse` | `bot_spread(bot/group)`、`bot_retreat(bot/group)` |
+| 攻击/协助攻击 | `attack`、`tank attack`、`pull`、`pull back`、`pull rti` | `bot_attack_target(bot, target)`、`bot_pull(bot, target)` |
+| 爆发输出 | `max dps` | `set_combat_mode(bot/group, "burst")` |
+| 准备确认 | `ready` | `ready_check(group)` |
+| 复活/灵魂医者 | `revive` | `bot_revive(bot)` |
+| 任务交互 | `accept`、`talk`、`q`、`qi`、`quests`、`reward` | `bot_accept_quest`、`bot_turnin_quest`、`bot_query_quest` |
+| 物品和交易 | `t`/`nt`、`buy`、`sell`、`equip`、`unequip`、`use`、`roll` | `bot_trade`、`bot_buy`、`bot_sell`、`bot_equip`、`bot_roll` |
+| 施法 | `cast`、`castnc` | `bot_cast_spell(bot, spell, target)`，必须做白名单。 |
+| 宠物控制 | `pet`、`pet attack` | `bot_pet_command(bot, command, target)` |
+| 天赋/雕文类维护 | `glyphs`、`glyph equip`、maintenance 相关动作 | GM 或受控维护任务，不给聊天自由调用。 |
+| 策略切换 | `ChangeStrategy("+x,-y", state)` | `set_strategy(bot/group, add=[...], remove=[...], state=combat/noncombat/dead)` |
+| 邀请真实玩家 | AzerothCore 组队 API，Playerbots 有组队/队伍上下文但当前没有现成 `.playerbots bot invite <player>` 命令 | `invite_player(target_player)`，需要 C++ Adapter 或安全动作层。 |
 
-不是所有本能都应该默认开启。随机生态、自动 LFG/BG、世界聊天等会显著增加资源消耗，也可能干扰 Agent 测试。当前默认只保留“可按需召唤和控制”的小队能力。
+重点：LLM 可以识别“跟我”“停一下”“开怪”“爆发”“加我”“加个奶”，但它输出的应该是结构化 intent。Adapter 再翻译成上表里的小脑语言。不要让 LLM 直接拼英文聊天快捷命令，也不要直接执行数据库写入。
+
+### L4：当前默认关闭或不建议暴露的能力
+
+这些能力在模块里存在，但和当前“Agent 可调度 bot 池”目标不一致，或者资源/安全风险较高。
+
+| 能力 | 当前状态 | 原因 |
+| --- | --- | --- |
+| 随机 bot 自动上线 | `AiPlayerbot.RandomBotAutologin = 0`，`MinRandomBots = 0`，`MaxRandomBots = 0` | 空服跑随机生态会显著增加 CPU/内存和数据库负载。 |
+| 随机 bot 自动进 LFG/BG/竞技场 | `RandomBotJoinLfg = 0`，`RandomBotJoinBG = 0` | 会制造大量后台活动，先不用于 Agent 小队测试。 |
+| 随机 bot 世界/公会/交易频道聊天 | `RandomBotTalk = 0`，相关广播概率不作为入口 | 容易干扰真实玩家和 Agent 聊天测试。 |
+| `.playerbots rndbot ...` | GM/控制台能力：`stats`、`reload`、`update`、`reset`、`init`、`clear`、`level`、`refresh`、`teleport`、`revive`、`grind`、`change_strategy` | 这是随机生态维护接口，不是普通 Agent 本能。需要测试随机生态时单独打开。 |
+| `.playerbots gtask ...` | GM 公会任务维护 | 不属于小队本能。 |
+| `.playerbots pmon/debug ...` | 性能监控/调试 | 运维工具，不给 LLM。 |
+| `.playerbots account ...` | 玩家账号绑定/解绑 | 涉及账号权限，不能由 LLM 自由调用。 |
+| Playerbots CommandServer | `AiPlayerbot.CommandServerPort = 0` | 当前关闭，后续若启用也必须加认证、限流和审计。 |
+
+### 第一批建议暴露给 LLM-Agent 的本能 API
+
+第一阶段只做低风险闭环：
+
+```text
+summon_bot(role, class_hint, gender?)
+dismiss_bot(bot_name)
+list_bots()
+lookup_bot_pool()
+init_bot(bot_name, mode="auto")
+refresh_bot(bot_name)
+level_bot(bot_name)
+```
+
+第二阶段再补队伍和指挥：
+
+```text
+invite_player(player_name)
+bot_follow(bot_name, target?)
+bot_stay(bot_name)
+bot_attack_target(bot_name, target)
+bot_pull(bot_name, target)
+set_strategy(bot_name|group, add=[], remove=[], state)
+bot_chat_command(bot_name|group, command, args)
+```
+
+第三阶段再考虑任务、交易、补给、旅行、随机生态和副本专用调度。
 
 ## 大脑能否调控本能
 

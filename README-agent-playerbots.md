@@ -51,6 +51,27 @@ warrior paladin hunter rogue priest shaman mage warlock druid dk
 
 当前配置里随机机器人系统是关闭的，所以不会自动刷一堆 bot 上线。先按需召唤，方便看资源和行为质量。
 
+## 当前可调用本能速查
+
+完整能力矩阵见：[ARCHITECTURE-agent-playerbots.md](/home/wuya/git/azerothcore-wotlk-git/ARCHITECTURE-agent-playerbots.md) 的“Playerbots 提供的本能”。
+
+第一批适合包装给 LLM-Agent 的本能：
+
+| Agent intent | 当前命令桥 |
+| --- | --- |
+| `summon_bot` | `.playerbots bot addclass <class> [male\|female]` |
+| `dismiss_bot` | `.playerbots bot remove <机器人名>` |
+| `list_bots` | `.playerbots bot list` |
+| `lookup_bot_pool` | `.playerbots bot lookup` |
+| `init_bot` | `.playerbots bot init=auto <机器人名>` |
+| `refresh_bot` | `.playerbots bot refresh <机器人名>` |
+| `level_bot` | `.playerbots bot levelup <机器人名>` |
+| `init_instance_quests` | `.playerbots bot quests <机器人名>` |
+
+已经存在但需要 Adapter 再包装的本能：`follow`、`stay`、`flee/runaway`、`attack`、`pull`、`max dps`、`ready`、`revive`、任务交互、交易/买卖/装备、施法、宠物控制、`set_strategy`、邀请真实玩家。
+
+随机 bot 生态、自动 LFG/BG、世界/公会频道聊天、`rndbot`、`gtask`、`pmon/debug`、账号绑定等能力当前不作为 LLM-Agent 可自由调用的本能。
+
 ## 为什么把 Playerbots 当本能
 
 旧方案里我们自己实现了跟随、治疗、协助、跑尸、聊天桥接等能力，但这些低层行为会持续膨胀：职业循环、躲技能、喝水、BUFF、宠物、装备、天赋、副本策略，每个都很复杂。
