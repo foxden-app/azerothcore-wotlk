@@ -84,6 +84,14 @@ class Action:
     bot_state: str | None = None
 
 
+@dataclasses.dataclass(frozen=True)
+class CombatMemory:
+    id: int
+    created_at: str
+    leader: str
+    summary: str
+
+
 def env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -220,10 +228,16 @@ class AgentBridge:
         self.poll_limit = poll_limit
         self.attention_until: dict[int, float] = defaultdict(float)
         self.history: deque[tuple[float, str, str, str]] = deque(maxlen=RECENT_MESSAGE_LIMIT)
-        self.last_id = self._load_last_id(replay)
+        self.combat_memory: deque[CombatMemory] = deque(
+            maxlen=int(os.getenv("PLAYERBOT_AGENT_COMBAT_MEMORY_LIMIT", "3"))
+        )
+        state = self._load_state(replay)
+        self.last_id = state["last_id"]
+        self.last_combat_id = state["last_combat_id"]
         self.llm = OpenAICompatibleClient.from_env()
         self.trace = env_bool("PLAYERBOT_AGENT_TRACE", False)
         self.trace_prompt = env_bool("PLAYERBOT_AGENT_TRACE_PROMPT", self.trace)
+        self._load_recent_combat_memory()
         log_agent(
             "startup",
             rule_only=self.rule_only,
@@ -232,35 +246,56 @@ class AgentBridge:
             llm_base_url=getattr(self.llm, "base_url", ""),
             llm_thinking=getattr(self.llm, "thinking", ""),
             last_id=self.last_id,
+            last_combat_id=self.last_combat_id,
             poll_limit=self.poll_limit,
         )
 
-    def _load_last_id(self, replay: bool) -> int:
-        if replay:
+    def _safe_scalar_int(self, sql: str) -> int:
+        try:
+            return self.db.scalar_int(sql)
+        except RuntimeError:
             return 0
+
+    def _load_state(self, replay: bool) -> dict[str, int]:
+        if replay:
+            return {"last_id": 0, "last_combat_id": 0}
         if self.state_path.exists():
             try:
-                return int(json.loads(self.state_path.read_text()).get("last_id", 0))
+                payload = json.loads(self.state_path.read_text())
+                return {
+                    "last_id": int(payload.get("last_id", 0)),
+                    "last_combat_id": int(payload.get("last_combat_id", 0)),
+                }
             except (OSError, ValueError, json.JSONDecodeError):
                 pass
-        return self.db.scalar_int("SELECT COALESCE(MAX(`id`), 0) FROM `agent_playerbot_events`")
+        return {
+            "last_id": self._safe_scalar_int("SELECT COALESCE(MAX(`id`), 0) FROM `agent_playerbot_events`"),
+            "last_combat_id": self._safe_scalar_int(
+                "SELECT COALESCE(MAX(`id`), 0) FROM `agent_playerbot_combat_summaries`"
+            ),
+        }
 
-    def _save_last_id(self) -> None:
+    def _save_state(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(json.dumps({"last_id": self.last_id}, ensure_ascii=False), encoding="utf-8")
+        self.state_path.write_text(
+            json.dumps({"last_id": self.last_id, "last_combat_id": self.last_combat_id}, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     def poll_once(self) -> int:
+        combat_count = self.poll_combat_summaries()
         events = self.fetch_events()
         for event in events:
             self.handle_event(event)
             self.last_id = max(self.last_id, event.id)
         if events:
-            self._save_last_id()
             self.db.execute(
                 "UPDATE `agent_playerbot_events` SET `processed_at` = NOW() "
                 f"WHERE `id` <= {self.last_id} AND `processed_at` IS NULL"
             )
-        return len(events)
+        if events or combat_count:
+            self._save_state()
+        return len(events) + combat_count
 
     def fetch_events(self) -> list[ChatEvent]:
         sql = (
@@ -300,6 +335,133 @@ class AgentBridge:
                 )
             )
         return events
+
+    def _load_recent_combat_memory(self) -> None:
+        try:
+            rows = self.db.query_rows(
+                "SELECT `id`, `created_at`, `group_leader_name`, TO_BASE64(COALESCE(`summary_text`, '')), "
+                "TO_BASE64(`facts_json`) FROM `agent_playerbot_combat_summaries` "
+                "ORDER BY `id` DESC LIMIT 3"
+            )
+        except RuntimeError:
+            return
+
+        memories: list[CombatMemory] = []
+        for row in reversed(rows):
+            summary = decode_b64(row[3]) or local_combat_summary(json.loads(decode_b64(row[4]) or "{}"))
+            if summary:
+                memories.append(
+                    CombatMemory(
+                        id=int(row[0] or 0),
+                        created_at=str(row[1] or ""),
+                        leader=str(row[2] or ""),
+                        summary=summary,
+                    )
+                )
+        self.combat_memory.extend(memories)
+
+    def poll_combat_summaries(self) -> int:
+        limit = int(os.getenv("PLAYERBOT_AGENT_COMBAT_POLL_LIMIT", "5"))
+        try:
+            rows = self.db.query_rows(
+                "SELECT `id`, `created_at`, `group_leader_name`, TO_BASE64(`facts_json`), "
+                "TO_BASE64(COALESCE(`summary_text`, '')) "
+                "FROM `agent_playerbot_combat_summaries` "
+                f"WHERE `id` > {int(self.last_combat_id)} ORDER BY `id` ASC LIMIT {limit}"
+            )
+        except RuntimeError as exc:
+            if self.trace:
+                log_agent("combat_summary_query_error", error=str(exc))
+            return 0
+
+        processed = 0
+        for row in rows:
+            combat_id = int(row[0] or 0)
+            facts_text = decode_b64(row[3])
+            try:
+                facts = json.loads(facts_text) if facts_text else {}
+            except json.JSONDecodeError:
+                facts = {}
+
+            existing_summary = decode_b64(row[4])
+            summary = existing_summary or self.summarize_combat(facts, combat_id)
+            if summary and not existing_summary:
+                self.db.execute(
+                    "UPDATE `agent_playerbot_combat_summaries` SET `summary_text` = "
+                    f"{sql_quote(summary)}, `summarized_at` = NOW() WHERE `id` = {combat_id}"
+                )
+
+            memory = CombatMemory(
+                id=combat_id,
+                created_at=str(row[1] or ""),
+                leader=str(row[2] or ""),
+                summary=summary,
+            )
+            self.combat_memory.append(memory)
+            self.last_combat_id = max(self.last_combat_id, combat_id)
+            processed += 1
+            log_agent("combat_summary_seen", id=combat_id, leader=memory.leader, summary=summary, facts=facts if self.trace else None)
+
+        return processed
+
+    def summarize_combat(self, facts: dict[str, Any], combat_id: int) -> str:
+        fallback = local_combat_summary(facts)
+        if self.rule_only or not self.llm.available:
+            return fallback
+
+        prompt = build_combat_summary_prompt(facts)
+        if self.trace_prompt:
+            log_agent("combat_summary_prompt", id=combat_id, prompt=prompt)
+
+        started = time.monotonic()
+        response = self.llm.complete(
+            prompt,
+            system="你是魔兽世界队伍战斗复盘器，只输出严格 JSON，不要输出解释。",
+        )
+        latency_ms = int((time.monotonic() - started) * 1000)
+        log_agent("combat_summary_response", id=combat_id, latency_ms=latency_ms, response=response)
+
+        try:
+            payload = json.loads(response)
+        except json.JSONDecodeError:
+            return fallback
+
+        summary = str(payload.get("summary", "")).strip()
+        tips = payload.get("tips") if isinstance(payload.get("tips"), list) else []
+        tip_text = "；".join(str(tip).strip() for tip in tips if str(tip).strip())
+        if summary and tip_text:
+            return f"{summary} 建议：{tip_text}"
+        return summary or fallback
+
+    def fetch_recent_action_results(self, event: ChatEvent, bot: BotInfo) -> list[dict[str, Any]]:
+        try:
+            rows = self.db.query_rows(
+                "SELECT `id`, `status`, `action_type`, `channel`, TO_BASE64(COALESCE(`text`, '')), "
+                "`command`, `strategy`, `bot_state`, TO_BASE64(COALESCE(`result`, '')), "
+                "TO_BASE64(COALESCE(`error`, '')) FROM `agent_playerbot_actions` "
+                f"WHERE `requester_guid` = {event.speaker_guid} AND `bot_guid` = {bot.guid} "
+                "ORDER BY `id` DESC LIMIT 8"
+            )
+        except RuntimeError:
+            return []
+
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            results.append(
+                {
+                    "id": int(row[0] or 0),
+                    "status": row[1],
+                    "type": row[2],
+                    "channel": row[3],
+                    "text": decode_b64(row[4]),
+                    "command": row[5],
+                    "strategy": row[6],
+                    "bot_state": row[7],
+                    "result": decode_b64(row[8]),
+                    "error": decode_b64(row[9]),
+                }
+            )
+        return results
 
     def handle_event(self, event: ChatEvent) -> None:
         now = time.time()
@@ -356,7 +518,15 @@ class AgentBridge:
         return event.channel in {"party", "raid", "say", "yell"} and self.attention_until[bot.guid] > now
 
     def llm_actions(self, event: ChatEvent, bot: BotInfo) -> list[Action]:
-        prompt = build_prompt(event, bot, self.history)
+        recent_action_results = self.fetch_recent_action_results(event, bot)
+        prompt = build_prompt(event, bot, self.history, self.combat_memory, recent_action_results)
+        if self.combat_memory:
+            log_agent(
+                "combat_memory_used",
+                event_id=event.id,
+                bot=bot.name,
+                memory=[dataclasses.asdict(memory) for memory in self.combat_memory],
+            )
         if self.trace_prompt:
             log_agent("llm_prompt", event_id=event.id, bot=bot.name, prompt=prompt)
 
@@ -579,13 +749,13 @@ class OpenAICompatibleClient:
     def available(self) -> bool:
         return True
 
-    def request_payload(self, prompt: str) -> dict[str, Any]:
+    def request_payload(self, prompt: str, system: str | None = None) -> dict[str, Any]:
         payload = {
             "model": self.model,
             "messages": [
                 {
                     "role": "system",
-                    "content": "你是魔兽世界队伍里的 Playerbot 大脑，只输出严格 JSON，不要输出解释。",
+                    "content": system or "你是魔兽世界队伍里的 Playerbot 大脑，只输出严格 JSON，不要输出解释。",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -597,8 +767,8 @@ class OpenAICompatibleClient:
             payload["thinking"] = {"type": self.thinking}
         return payload
 
-    def complete(self, prompt: str) -> str:
-        payload = self.request_payload(prompt)
+    def complete(self, prompt: str, system: str | None = None) -> str:
+        payload = self.request_payload(prompt, system)
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
@@ -620,11 +790,79 @@ class OpenAICompatibleClient:
 class NullLLM:
     available = False
 
-    def complete(self, prompt: str) -> str:
+    def complete(self, prompt: str, system: str | None = None) -> str:
         return ""
 
 
-def build_prompt(event: ChatEvent, bot: BotInfo, history: Iterable[tuple[float, str, str, str]]) -> str:
+def seconds_text(duration_ms: int | float) -> str:
+    seconds = max(0, int(round(float(duration_ms) / 1000.0)))
+    return f"{seconds}秒"
+
+
+def lowest_member(facts: dict[str, Any], key: str) -> dict[str, Any] | None:
+    members = [member for member in facts.get("members", []) if isinstance(member, dict)]
+    members = [member for member in members if isinstance(member.get(key), (int, float))]
+    if not members:
+        return None
+    return min(members, key=lambda member: float(member.get(key, 101)))
+
+
+def local_combat_summary(facts: dict[str, Any]) -> str:
+    totals = facts.get("totals") if isinstance(facts.get("totals"), dict) else {}
+    duration = seconds_text(facts.get("duration_ms", 0))
+    kills = int(totals.get("kills") or facts.get("kills") or 0)
+    deaths = int(totals.get("deaths") or facts.get("deaths") or 0)
+    damage_done = int(totals.get("damage_done") or 0)
+    damage_taken = int(totals.get("damage_taken") or 0)
+    healing_done = int(totals.get("healing_done") or 0)
+    healer_threat = int(totals.get("healer_threat_events") or 0)
+
+    parts = [
+        f"上一场战斗持续{duration}",
+        f"击杀{kills}个目标",
+        f"队伍死亡{deaths}次",
+        f"造成伤害{damage_done}",
+        f"承受伤害{damage_taken}",
+        f"治疗{healing_done}",
+    ]
+
+    low_hp = lowest_member(facts, "min_health_pct")
+    if low_hp:
+        parts.append(f"{low_hp.get('name')}最低血量{float(low_hp.get('min_health_pct', 0)):.0f}%")
+
+    low_mana = lowest_member(facts, "min_mana_pct")
+    if low_mana:
+        parts.append(f"{low_mana.get('name')}最低蓝量{float(low_mana.get('min_mana_pct', 0)):.0f}%")
+
+    if healer_threat:
+        parts.append(f"治疗被怪命中{healer_threat}次，注意仇恨")
+
+    if deaths:
+        parts.append("下次优先保命和撤退")
+    elif healer_threat:
+        parts.append("下次让战士先拉稳，治疗保持安心奶")
+    else:
+        parts.append("整体可继续按当前节奏推进")
+
+    return "，".join(parts) + "。"
+
+
+def build_combat_summary_prompt(facts: dict[str, Any]) -> str:
+    return (
+        "根据这场魔兽世界队伍战斗事实，压缩成一段中文战斗记忆。"
+        "关注是否死人、治疗是否危险、是否抢仇恨、是否需要撤退或调整策略。"
+        "只允许输出 JSON：{\"summary\":\"一句话复盘\",\"tips\":[\"建议1\",\"建议2\"]}。\n"
+        f"战斗事实：{json.dumps(facts, ensure_ascii=False)}"
+    )
+
+
+def build_prompt(
+    event: ChatEvent,
+    bot: BotInfo,
+    history: Iterable[tuple[float, str, str, str]],
+    combat_memory: Iterable[CombatMemory] = (),
+    recent_action_results: Iterable[dict[str, Any]] = (),
+) -> str:
     recent = [
         {"channel": channel, "speaker": speaker, "message": message}
         for _, channel, speaker, message in history
@@ -638,6 +876,8 @@ def build_prompt(event: ChatEvent, bot: BotInfo, history: Iterable[tuple[float, 
         },
         "world_context": event.context,
         "recent_messages": recent[-20:],
+        "recent_combat_summaries": [dataclasses.asdict(memory) for memory in combat_memory],
+        "recent_action_results": list(recent_action_results),
         "available_skills": [
             "reply",
             "no_reply",
@@ -765,7 +1005,10 @@ def main(argv: list[str]) -> int:
         try:
             count = bridge.poll_once()
             if count:
-                print(f"processed {count} event(s), last_id={bridge.last_id}", flush=True)
+                print(
+                    f"processed {count} item(s), last_id={bridge.last_id}, last_combat_id={bridge.last_combat_id}",
+                    flush=True,
+                )
         except Exception as exc:
             print(f"playerbot-agent error: {exc}", file=sys.stderr, flush=True)
             if args.once:

@@ -427,6 +427,18 @@ PLAYERBOT_AGENT_LLM_MAX_TOKENS=512
 
 运行时 key 只进入进程环境，不进入配置文件或仓库。规则层先处理明确中文指令；LLM 只负责更自然的闲聊、复杂表达和意图归一化，输出仍必须是 Adapter 能验证的 JSON。
 
+v1.1 增加战斗感知管线：
+
+```text
+UnitScript/PlayerScript 战斗 hook
+  -> C++ 内存聚合伤害/治疗/死亡/击杀/仇恨风险
+  -> 战斗脱离后写 agent_playerbot_combat_summaries.facts_json
+  -> Python sidecar 压缩 summary_text
+  -> 主 Agent prompt 带最近战斗摘要和最近 action 执行结果
+```
+
+原则：主 Agent 不消费逐条原始战斗日志，只消费当前环境、短战斗摘要和动作执行结果。这样能让 Agent 理解“刚才打得怎么样”，又不会被高频战斗事件拖慢或污染决策。
+
 第二阶段：更完整 C++ Adapter
 
 ```text
@@ -441,9 +453,9 @@ modules/mod-playerbot-agent
 第三阶段：Agent 记忆和复盘
 
 ```text
-队伍聊天 / 战斗日志 / 死亡 / 蓝量 / 位置 / 命令结果
-  -> 过程摘要
-  -> 经验库
+队伍聊天 / 战斗摘要 / 死亡 / 蓝量 / 位置 / 命令结果
+  -> 短期战斗记忆
+  -> 长期经验库
   -> 下次副本/任务前检索
   -> 大脑调整策略
 ```

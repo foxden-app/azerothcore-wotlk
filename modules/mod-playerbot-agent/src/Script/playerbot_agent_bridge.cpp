@@ -22,12 +22,15 @@
 #include "PlayerbotMgr.h"
 #include "Playerbots.h"
 #include "ScriptMgr.h"
+#include "GameTime.h"
+#include "UnitScript.h"
 #include "WorldScript.h"
 #include "WorldSession.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <deque>
 #include <iomanip>
 #include <list>
 #include <map>
@@ -45,6 +48,10 @@ uint32 MaxReplyLength = 220;
 bool TraceLog = true;
 float ContextRange = 45.0f;
 uint32 MaxNearbyHostiles = 8;
+bool CombatTelemetryEnabled = true;
+uint32 CombatIdleEndMs = 5000;
+uint32 CombatMinDurationMs = 3000;
+uint32 CombatTimelineLimit = 80;
 
 std::string ToLowerAscii(std::string value)
 {
@@ -161,6 +168,63 @@ uint32 ManaPct(Unit* unit)
     return static_cast<uint32>(std::round(100.0f * static_cast<float>(unit->GetPower(POWER_MANA)) / static_cast<float>(maxMana)));
 }
 
+uint64 NowMs()
+{
+    return static_cast<uint64>(GameTime::GetGameTimeMS().count());
+}
+
+struct CombatMemberStats
+{
+    uint32 guid = 0;
+    std::string name;
+    uint8 playerClass = 0;
+    std::string role;
+    bool isBot = false;
+    uint64 damageDone = 0;
+    uint64 damageTaken = 0;
+    uint64 healingDone = 0;
+    uint64 healingReceived = 0;
+    float minHealthPct = 100.0f;
+    uint32 minManaPct = 101;
+    uint32 deaths = 0;
+    uint32 hostileHitsTaken = 0;
+};
+
+struct CombatEnemyStats
+{
+    uint32 guid = 0;
+    uint32 entry = 0;
+    std::string name;
+    uint8 level = 0;
+    uint64 damageDone = 0;
+    uint64 damageTaken = 0;
+    bool killed = false;
+};
+
+struct CombatSession
+{
+    uint32 key = 0;
+    uint32 leaderGuid = 0;
+    std::string leaderName;
+    uint32 mapId = 0;
+    uint32 zoneId = 0;
+    uint32 areaId = 0;
+    uint64 startedMs = 0;
+    uint64 lastActivityMs = 0;
+    uint64 damageDone = 0;
+    uint64 damageTaken = 0;
+    uint64 healingDone = 0;
+    uint32 kills = 0;
+    uint32 deaths = 0;
+    uint32 healerThreatEvents = 0;
+    uint32 botThreatEvents = 0;
+    std::map<uint32, CombatMemberStats> members;
+    std::map<uint32, CombatEnemyStats> enemies;
+    std::deque<std::string> timeline;
+};
+
+std::map<uint32, CombatSession> CombatSessions;
+
 bool IsRealPlayer(Player* player)
 {
     return player && player->GetSession() && !player->GetSession()->IsBot();
@@ -183,6 +247,158 @@ std::string DetectRole(Player* bot)
         return "healer";
 
     return "dps";
+}
+
+Player* UnitOwnerPlayer(Unit* unit)
+{
+    return unit ? unit->GetCharmerOrOwnerPlayerOrPlayerItself() : nullptr;
+}
+
+bool GroupHasRealPlayerAndBot(Group* group)
+{
+    if (!group)
+        return false;
+
+    bool hasReal = false;
+    bool hasBot = false;
+    for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+    {
+        Player* member = itr->GetSource();
+        hasReal = hasReal || IsRealPlayer(member);
+        hasBot = hasBot || IsPlayerbot(member);
+        if (hasReal && hasBot)
+            return true;
+    }
+
+    return false;
+}
+
+bool HasOwnedPlayerbot(Player* player)
+{
+    if (!player || !IsRealPlayer(player))
+        return false;
+
+    if (PlayerbotMgr* mgr = GET_PLAYERBOT_MGR(player))
+        return mgr->GetPlayerBotsBegin() != mgr->GetPlayerBotsEnd();
+
+    return false;
+}
+
+bool GetAgentParty(Player* player, uint32& key, uint32& leaderGuid, std::string& leaderName, Group*& group)
+{
+    key = 0;
+    leaderGuid = 0;
+    leaderName.clear();
+    group = nullptr;
+
+    if (!player)
+        return false;
+
+    group = player->GetGroup();
+    if (group)
+    {
+        if (!GroupHasRealPlayerAndBot(group))
+            return false;
+
+        leaderGuid = group->GetLeaderGUID().GetCounter();
+        key = leaderGuid ? leaderGuid : player->GetGUID().GetCounter();
+        if (Player* leader = ObjectAccessor::FindPlayer(group->GetLeaderGUID()))
+            leaderName = leader->GetName();
+        else
+            leaderName = player->GetName();
+        return key != 0;
+    }
+
+    if (!HasOwnedPlayerbot(player))
+        return false;
+
+    key = player->GetGUID().GetCounter();
+    leaderGuid = key;
+    leaderName = player->GetName();
+    return true;
+}
+
+CombatMemberStats& TouchMember(CombatSession& session, Player* player)
+{
+    uint32 guid = player->GetGUID().GetCounter();
+    CombatMemberStats& stats = session.members[guid];
+    stats.guid = guid;
+    stats.name = player->GetName();
+    stats.playerClass = player->getClass();
+    stats.role = IsPlayerbot(player) ? DetectRole(player) : "player";
+    stats.isBot = IsPlayerbot(player);
+    stats.minHealthPct = std::min(stats.minHealthPct, player->GetHealthPct());
+    uint32 manaPct = ManaPct(player);
+    if (manaPct > 0)
+        stats.minManaPct = std::min(stats.minManaPct, manaPct);
+    return stats;
+}
+
+CombatEnemyStats& TouchEnemy(CombatSession& session, Unit* unit)
+{
+    uint32 guid = unit->GetGUID().GetCounter();
+    CombatEnemyStats& stats = session.enemies[guid];
+    stats.guid = guid;
+    stats.entry = unit->GetEntry();
+    stats.name = unit->GetName();
+    stats.level = unit->GetLevel();
+    return stats;
+}
+
+void AddTimeline(CombatSession& session, std::string const& text)
+{
+    if (!CombatTimelineLimit)
+        return;
+
+    if (session.timeline.size() >= CombatTimelineLimit)
+        session.timeline.pop_front();
+
+    session.timeline.push_back(text);
+}
+
+void RefreshSessionMembers(CombatSession& session, Group* group, Player* fallback)
+{
+    if (group)
+    {
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+            if (Player* member = itr->GetSource())
+                if (IsRealPlayer(member) || IsPlayerbot(member))
+                    TouchMember(session, member);
+        return;
+    }
+
+    if (fallback)
+        TouchMember(session, fallback);
+}
+
+CombatSession* TouchCombatSession(Player* relatedPlayer, uint64 now)
+{
+    if (!AgentEnabled || !SchemaReady || !CombatTelemetryEnabled || !relatedPlayer)
+        return nullptr;
+
+    uint32 key = 0;
+    uint32 leaderGuid = 0;
+    std::string leaderName;
+    Group* group = nullptr;
+    if (!GetAgentParty(relatedPlayer, key, leaderGuid, leaderName, group))
+        return nullptr;
+
+    CombatSession& session = CombatSessions[key];
+    if (!session.key)
+    {
+        session.key = key;
+        session.startedMs = now;
+        session.mapId = relatedPlayer->GetMapId();
+        session.zoneId = relatedPlayer->GetZoneId();
+        session.areaId = relatedPlayer->GetAreaId();
+        AddTimeline(session, "combat started near " + relatedPlayer->GetName());
+    }
+
+    session.leaderGuid = leaderGuid;
+    session.leaderName = leaderName;
+    session.lastActivityMs = now;
+    RefreshSessionMembers(session, group, relatedPlayer);
+    return &session;
 }
 
 BotSnapshot MakeSnapshot(Player* bot, Player* reference = nullptr)
@@ -450,6 +666,251 @@ std::string EventMetaToJson(Player* speaker, Group* group, std::vector<BotSnapsh
     return out.str();
 }
 
+std::string CombatFactsToJson(CombatSession const& session, uint64 endedMs)
+{
+    uint64 durationMs = endedMs > session.startedMs ? endedMs - session.startedMs : 0;
+
+    std::ostringstream out;
+    out << "{\"group_leader\":{\"guid\":" << session.leaderGuid
+        << ",\"name\":\"" << JsonEscape(session.leaderName) << "\"}"
+        << ",\"map_id\":" << session.mapId
+        << ",\"zone_id\":" << session.zoneId
+        << ",\"area_id\":" << session.areaId
+        << ",\"duration_ms\":" << durationMs
+        << ",\"totals\":{"
+        << "\"damage_done\":" << session.damageDone
+        << ",\"damage_taken\":" << session.damageTaken
+        << ",\"healing_done\":" << session.healingDone
+        << ",\"kills\":" << session.kills
+        << ",\"deaths\":" << session.deaths
+        << ",\"bot_threat_events\":" << session.botThreatEvents
+        << ",\"healer_threat_events\":" << session.healerThreatEvents
+        << "},\"members\":[";
+
+    bool first = true;
+    for (auto const& pair : session.members)
+    {
+        CombatMemberStats const& member = pair.second;
+        if (!first)
+            out << ",";
+        first = false;
+
+        out << "{\"guid\":" << member.guid
+            << ",\"name\":\"" << JsonEscape(member.name) << "\""
+            << ",\"class\":" << static_cast<uint32>(member.playerClass)
+            << ",\"role\":\"" << JsonEscape(member.role) << "\""
+            << ",\"is_bot\":" << (member.isBot ? "true" : "false")
+            << ",\"damage_done\":" << member.damageDone
+            << ",\"damage_taken\":" << member.damageTaken
+            << ",\"healing_done\":" << member.healingDone
+            << ",\"healing_received\":" << member.healingReceived
+            << ",\"min_health_pct\":" << FloatString(member.minHealthPct)
+            << ",\"min_mana_pct\":";
+        if (member.minManaPct <= 100)
+            out << member.minManaPct;
+        else
+            out << "null";
+        out << ",\"deaths\":" << member.deaths
+            << ",\"hostile_hits_taken\":" << member.hostileHitsTaken
+            << "}";
+    }
+
+    out << "],\"enemies\":[";
+    first = true;
+    for (auto const& pair : session.enemies)
+    {
+        CombatEnemyStats const& enemy = pair.second;
+        if (!first)
+            out << ",";
+        first = false;
+
+        out << "{\"guid\":" << enemy.guid
+            << ",\"entry\":" << enemy.entry
+            << ",\"name\":\"" << JsonEscape(enemy.name) << "\""
+            << ",\"level\":" << static_cast<uint32>(enemy.level)
+            << ",\"damage_done\":" << enemy.damageDone
+            << ",\"damage_taken\":" << enemy.damageTaken
+            << ",\"killed\":" << (enemy.killed ? "true" : "false")
+            << "}";
+    }
+
+    out << "],\"timeline\":[";
+    for (std::size_t i = 0; i < session.timeline.size(); ++i)
+    {
+        if (i)
+            out << ",";
+        out << "\"" << JsonEscape(session.timeline[i]) << "\"";
+    }
+
+    out << "]}";
+    return out.str();
+}
+
+void InsertCombatSummary(CombatSession const& session, uint64 endedMs)
+{
+    uint64 durationMs = endedMs > session.startedMs ? endedMs - session.startedMs : 0;
+    if (durationMs < CombatMinDurationMs && !session.kills && !session.deaths && session.damageDone < 100)
+        return;
+
+    std::string facts = CombatFactsToJson(session, endedMs);
+    PlayerbotsDatabase.Execute(
+        "INSERT INTO `agent_playerbot_combat_summaries` "
+        "(`group_leader_guid`, `group_leader_name`, `map_id`, `zone_id`, `area_id`, `duration_ms`, "
+        "`kills`, `deaths`, `facts_json`) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {})",
+        session.leaderGuid, SqlQuote(session.leaderName), session.mapId, session.zoneId, session.areaId,
+        durationMs, session.kills, session.deaths, SqlQuote(facts));
+
+    if (TraceLog)
+        LOG_INFO("module.playerbot_agent", "Combat summary queued leader={} duration_ms={} kills={} deaths={}",
+                 session.leaderName, durationMs, session.kills, session.deaths);
+}
+
+void RecordDamage(Unit* attacker, Unit* victim, uint32 damage)
+{
+    if (!attacker || !victim || !damage)
+        return;
+
+    Player* attackerPlayer = UnitOwnerPlayer(attacker);
+    Player* victimPlayer = UnitOwnerPlayer(victim);
+    Player* relatedPlayer = attackerPlayer ? attackerPlayer : victimPlayer;
+    uint64 now = NowMs();
+    CombatSession* session = TouchCombatSession(relatedPlayer, now);
+    if (!session)
+        return;
+
+    bool attackerMember = attackerPlayer && session->members.find(attackerPlayer->GetGUID().GetCounter()) != session->members.end();
+    bool victimMember = victimPlayer && session->members.find(victimPlayer->GetGUID().GetCounter()) != session->members.end();
+
+    if (attackerMember && !victimMember)
+    {
+        CombatMemberStats& member = TouchMember(*session, attackerPlayer);
+        member.damageDone += damage;
+        session->damageDone += damage;
+
+        if (!victim->IsPlayer())
+        {
+            CombatEnemyStats& enemy = TouchEnemy(*session, victim);
+            enemy.damageTaken += damage;
+        }
+    }
+
+    if (victimMember && !attackerMember)
+    {
+        CombatMemberStats& member = TouchMember(*session, victimPlayer);
+        member.damageTaken += damage;
+        member.hostileHitsTaken += 1;
+        session->damageTaken += damage;
+
+        if (member.isBot)
+        {
+            session->botThreatEvents += 1;
+            if (member.role == "healer")
+                session->healerThreatEvents += 1;
+        }
+
+        if (!attacker->IsPlayer())
+        {
+            CombatEnemyStats& enemy = TouchEnemy(*session, attacker);
+            enemy.damageDone += damage;
+        }
+    }
+}
+
+void RecordHeal(Unit* healer, Unit* receiver, uint32 gain)
+{
+    if (!healer || !receiver || !gain)
+        return;
+
+    Player* healerPlayer = UnitOwnerPlayer(healer);
+    Player* receiverPlayer = UnitOwnerPlayer(receiver);
+    Player* relatedPlayer = healerPlayer ? healerPlayer : receiverPlayer;
+    uint64 now = NowMs();
+    CombatSession* session = TouchCombatSession(relatedPlayer, now);
+    if (!session)
+        return;
+
+    bool healerMember = healerPlayer && session->members.find(healerPlayer->GetGUID().GetCounter()) != session->members.end();
+    bool receiverMember = receiverPlayer && session->members.find(receiverPlayer->GetGUID().GetCounter()) != session->members.end();
+    if (!healerMember || !receiverMember)
+        return;
+
+    CombatMemberStats& healerStats = TouchMember(*session, healerPlayer);
+    CombatMemberStats& receiverStats = TouchMember(*session, receiverPlayer);
+    healerStats.healingDone += gain;
+    receiverStats.healingReceived += gain;
+    session->healingDone += gain;
+}
+
+void RecordDeath(Unit* unit, Unit* killer)
+{
+    if (!unit)
+        return;
+
+    Player* deadPlayer = UnitOwnerPlayer(unit);
+    Player* killerPlayer = UnitOwnerPlayer(killer);
+    Player* relatedPlayer = deadPlayer ? deadPlayer : killerPlayer;
+    uint64 now = NowMs();
+    CombatSession* session = TouchCombatSession(relatedPlayer, now);
+    if (!session)
+        return;
+
+    if (deadPlayer && session->members.find(deadPlayer->GetGUID().GetCounter()) != session->members.end())
+    {
+        CombatMemberStats& member = TouchMember(*session, deadPlayer);
+        member.deaths += 1;
+        session->deaths += 1;
+        AddTimeline(*session, deadPlayer->GetName() + " died");
+        return;
+    }
+
+    if (killerPlayer && !unit->IsPlayer() && session->members.find(killerPlayer->GetGUID().GetCounter()) != session->members.end())
+    {
+        CombatEnemyStats& enemy = TouchEnemy(*session, unit);
+        if (!enemy.killed)
+        {
+            enemy.killed = true;
+            session->kills += 1;
+            AddTimeline(*session, unit->GetName() + " killed by " + killerPlayer->GetName());
+        }
+    }
+}
+
+void RecordCombatEnter(Unit* unit, Unit* victim)
+{
+    Player* player = UnitOwnerPlayer(unit);
+    if (!player)
+        player = UnitOwnerPlayer(victim);
+
+    CombatSession* session = TouchCombatSession(player, NowMs());
+    if (!session)
+        return;
+
+    if (unit && !unit->IsPlayer())
+        TouchEnemy(*session, unit);
+    if (victim && !victim->IsPlayer())
+        TouchEnemy(*session, victim);
+}
+
+void ProcessCombatSessions()
+{
+    if (!CombatTelemetryEnabled || CombatSessions.empty())
+        return;
+
+    uint64 now = NowMs();
+    for (auto itr = CombatSessions.begin(); itr != CombatSessions.end();)
+    {
+        CombatSession const& session = itr->second;
+        if (now >= session.lastActivityMs && now - session.lastActivityMs >= CombatIdleEndMs)
+        {
+            InsertCombatSummary(session, now);
+            itr = CombatSessions.erase(itr);
+            continue;
+        }
+
+        ++itr;
+    }
+}
+
 void EnsureSchema()
 {
     PlayerbotsDatabase.DirectExecute(
@@ -498,6 +959,26 @@ void EnsureSchema()
         "PRIMARY KEY (`id`),"
         "KEY `idx_agent_playerbot_actions_status` (`status`, `available_at`, `id`),"
         "KEY `idx_agent_playerbot_actions_event` (`source_event_id`)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+    PlayerbotsDatabase.DirectExecute(
+        "CREATE TABLE IF NOT EXISTS `agent_playerbot_combat_summaries` ("
+        "`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,"
+        "`created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "`summarized_at` TIMESTAMP NULL DEFAULT NULL,"
+        "`group_leader_guid` INT UNSIGNED NOT NULL DEFAULT 0,"
+        "`group_leader_name` VARCHAR(64) NOT NULL DEFAULT '',"
+        "`map_id` INT UNSIGNED NOT NULL DEFAULT 0,"
+        "`zone_id` INT UNSIGNED NOT NULL DEFAULT 0,"
+        "`area_id` INT UNSIGNED NOT NULL DEFAULT 0,"
+        "`duration_ms` BIGINT UNSIGNED NOT NULL DEFAULT 0,"
+        "`kills` INT UNSIGNED NOT NULL DEFAULT 0,"
+        "`deaths` INT UNSIGNED NOT NULL DEFAULT 0,"
+        "`facts_json` MEDIUMTEXT NOT NULL,"
+        "`summary_text` TEXT NULL DEFAULT NULL,"
+        "PRIMARY KEY (`id`),"
+        "KEY `idx_agent_playerbot_combat_summarized` (`summarized_at`, `id`),"
+        "KEY `idx_agent_playerbot_combat_created` (`created_at`)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
     SchemaReady = true;
@@ -822,7 +1303,9 @@ public:
         {
             PLAYERHOOK_CAN_PLAYER_USE_CHAT,
             PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT,
-            PLAYERHOOK_CAN_PLAYER_USE_GROUP_CHAT
+            PLAYERHOOK_CAN_PLAYER_USE_GROUP_CHAT,
+            PLAYERHOOK_ON_PLAYER_ENTER_COMBAT,
+            PLAYERHOOK_ON_PLAYER_LEAVE_COMBAT
         })
     {
     }
@@ -871,6 +1354,51 @@ public:
         InsertChatEvent(player, channel, type, msg, nullptr, group, bots);
         return true;
     }
+
+    void OnPlayerEnterCombat(Player* player, Unit* enemy) override
+    {
+        RecordCombatEnter(player, enemy);
+    }
+
+    void OnPlayerLeaveCombat(Player* player) override
+    {
+        if (CombatSession* session = TouchCombatSession(player, NowMs()))
+            AddTimeline(*session, player->GetName() + " left combat");
+    }
+};
+
+class PlayerbotAgentUnitScript : public UnitScript
+{
+public:
+    PlayerbotAgentUnitScript() : UnitScript("PlayerbotAgentUnitScript", true,
+        {
+            UNITHOOK_ON_HEAL,
+            UNITHOOK_ON_DAMAGE,
+            UNITHOOK_ON_UNIT_ENTER_COMBAT,
+            UNITHOOK_ON_UNIT_DEATH
+        })
+    {
+    }
+
+    void OnHeal(Unit* healer, Unit* receiver, uint32& gain) override
+    {
+        RecordHeal(healer, receiver, gain);
+    }
+
+    void OnDamage(Unit* attacker, Unit* victim, uint32& damage) override
+    {
+        RecordDamage(attacker, victim, damage);
+    }
+
+    void OnUnitEnterCombat(Unit* unit, Unit* victim) override
+    {
+        RecordCombatEnter(unit, victim);
+    }
+
+    void OnUnitDeath(Unit* unit, Unit* killer) override
+    {
+        RecordDeath(unit, killer);
+    }
 };
 
 class PlayerbotAgentWorldScript : public WorldScript
@@ -892,6 +1420,10 @@ public:
         TraceLog = sConfigMgr->GetOption<bool>("AgentPlayerbot.TraceLog", true);
         ContextRange = sConfigMgr->GetOption<float>("AgentPlayerbot.ContextRange", 45.0f);
         MaxNearbyHostiles = sConfigMgr->GetOption<uint32>("AgentPlayerbot.MaxNearbyHostiles", 8);
+        CombatTelemetryEnabled = sConfigMgr->GetOption<bool>("AgentPlayerbot.CombatTelemetryEnabled", true);
+        CombatIdleEndMs = sConfigMgr->GetOption<uint32>("AgentPlayerbot.CombatIdleEndMs", 5000);
+        CombatMinDurationMs = sConfigMgr->GetOption<uint32>("AgentPlayerbot.CombatMinDurationMs", 3000);
+        CombatTimelineLimit = sConfigMgr->GetOption<uint32>("AgentPlayerbot.CombatTimelineLimit", 80);
 
         if (!AgentEnabled)
         {
@@ -901,8 +1433,9 @@ public:
 
         EnsureSchema();
         LOG_INFO("module.playerbot_agent",
-                 "Playerbot Agent bridge enabled; action poll interval {} ms, trace={}, context range={}, max hostiles={}",
-                 ActionPollIntervalMs, TraceLog ? "on" : "off", ContextRange, MaxNearbyHostiles);
+                 "Playerbot Agent bridge enabled; action poll interval {} ms, trace={}, context range={}, max hostiles={}, combat telemetry={}",
+                 ActionPollIntervalMs, TraceLog ? "on" : "off", ContextRange, MaxNearbyHostiles,
+                 CombatTelemetryEnabled ? "on" : "off");
     }
 
     void OnUpdate(uint32 diff) override
@@ -916,6 +1449,7 @@ public:
 
         ActionPollElapsedMs = 0;
         ProcessPendingActions();
+        ProcessCombatSessions();
     }
 };
 }
@@ -923,5 +1457,6 @@ public:
 void AddSC_playerbot_agent_bridge()
 {
     new PlayerbotAgentPlayerScript();
+    new PlayerbotAgentUnitScript();
     new PlayerbotAgentWorldScript();
 }

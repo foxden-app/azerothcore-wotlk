@@ -18,3 +18,10 @@ AgentPlayerbot.TraceLog = 1
 # Runtime context attached to each queued chat event for the Python LLM sidecar.
 AgentPlayerbot.ContextRange = 45
 AgentPlayerbot.MaxNearbyHostiles = 8
+
+# Aggregate combat facts for real-player + Playerbot groups. Raw damage/heal
+# events stay in memory; one compact row is written after combat goes idle.
+AgentPlayerbot.CombatTelemetryEnabled = 1
+AgentPlayerbot.CombatIdleEndMs = 5000
+AgentPlayerbot.CombatMinDurationMs = 3000
+AgentPlayerbot.CombatTimelineLimit = 80

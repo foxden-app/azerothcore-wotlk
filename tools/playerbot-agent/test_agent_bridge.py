@@ -74,6 +74,35 @@ class RuleActionTests(unittest.TestCase):
         self.assertEqual(payload["thinking"], {"type": "disabled"})
         self.assertEqual(payload["max_tokens"], 512)
 
+    def test_local_combat_summary(self):
+        facts = {
+            "duration_ms": 42000,
+            "totals": {
+                "damage_done": 1200,
+                "damage_taken": 600,
+                "healing_done": 500,
+                "kills": 2,
+                "deaths": 0,
+                "healer_threat_events": 1,
+            },
+            "members": [
+                {"name": "Wuya", "min_health_pct": 31, "min_mana_pct": None},
+                {"name": "小牧", "min_health_pct": 80, "min_mana_pct": 54},
+            ],
+        }
+        summary = agent_bridge.local_combat_summary(facts)
+        self.assertIn("42秒", summary)
+        self.assertIn("击杀2个目标", summary)
+        self.assertIn("治疗被怪命中1次", summary)
+
+    def test_prompt_includes_memory_and_action_results(self):
+        memory = [agent_bridge.CombatMemory(1, "now", "Wuya", "上一场战斗很稳。")]
+        actions = [{"id": 1, "status": "done", "type": "command", "command": "follow"}]
+        prompt = agent_bridge.build_prompt(self.event_with("奶妈刚才怎么样"), self.priest, [], memory, actions)
+        self.assertIn("recent_combat_summaries", prompt)
+        self.assertIn("上一场战斗很稳", prompt)
+        self.assertIn("follow", prompt)
+
 
 def dataclasses_replace(instance, **changes):
     import dataclasses

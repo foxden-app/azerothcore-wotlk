@@ -18,12 +18,13 @@
 - 关闭随机 bot 自动上线，避免空服跑随机生态。
 - 保留 AddClass 能力，作为后续 Agent 按需召唤 bot 的入口。
 - 已实现第一批中文指挥 skill：跟随、停下、撤退、攻击、拉怪、重点治疗、拾取策略、buff 策略、治疗安全/补输出。
+- 已接入环境/战斗感知：聊天 prompt 会带当前队伍状态、目标、附近敌人、最近 action 结果和最近战斗摘要。
 
 还没完成：
 
 - 还没有把“召唤/删除/初始化 bot”交给 LLM-Agent 自动执行。
 - 还没有实现邀请真实玩家进队。
-- 还没有做长期记忆、复盘、任务规划。
+- 还没有做长期跨天记忆、任务规划、背包/装备策略。
 
 ## 怎么玩
 
@@ -49,6 +50,21 @@ Agent PlayerBot
 
 ```text
 warrior paladin hunter rogue priest shaman mage warlock druid dk
+```
+
+中文对照：
+
+```text
+warrior 战士
+paladin 圣骑士
+hunter  猎人
+rogue   盗贼
+priest  牧师/治疗
+shaman  萨满/治疗
+mage    法师
+warlock 术士
+druid   德鲁伊/治疗
+dk      死亡骑士
 ```
 
 当前配置里随机机器人系统是关闭的，所以不会自动刷一堆 bot 上线。先按需召唤，方便看资源和行为质量。
@@ -82,6 +98,17 @@ WUJI:      赛博丶执著爱 Lv20 圣骑士
 .playerbots bot init=auto <机器人名>
 ```
 
+如果只是试玩，可以按这个顺序：
+
+```text
+1. 登录 Agent PlayerBot，选择 Wuya 战士。
+2. 输入：.playerbots bot addclass priest female
+3. 看到牧师进队后，对她说：奶妈跟我
+4. 对她说：奶妈安心奶，别输出
+5. 选中一只怪自己开打，观察牧师补 buff、治疗、拾取。
+6. 打完后对她说：奶妈刚才打得怎么样
+```
+
 也可以测试其他治疗：
 
 ```text
@@ -110,6 +137,8 @@ pull
 捡垃圾
 别捡了
 补buff
+奶妈刚才打得怎么样
+奶妈我们现在能继续拉怪吗
 ```
 
 这些话会先进入 `mod-playerbot-agent`，再由 Python 侧车转成白名单动作。没有配置大模型时，规则模式也能处理上面的常用指令。
@@ -141,9 +170,12 @@ tail -f env/dist/logs/playerbot-agent.log
 tail -f env/dist/logs/Server.log | rg 'module.playerbot_agent|Playerbot Agent'
 mysql -h127.0.0.1 -P3306 -uacore -pacore --default-character-set=utf8mb4 acore_playerbots \
   -e "SELECT id, source_event_id, status, bot_name, action_type, channel, text, command, strategy, bot_state, result, error FROM agent_playerbot_actions ORDER BY id DESC LIMIT 20\\G"
+
+mysql -h127.0.0.1 -P3306 -uacore -pacore --default-character-set=utf8mb4 acore_playerbots \
+  -e "SELECT id, created_at, group_leader_name, duration_ms, kills, deaths, summary_text, LEFT(facts_json, 1000) AS facts FROM agent_playerbot_combat_summaries ORDER BY id DESC LIMIT 5\\G"
 ```
 
-`playerbot-agent.log` 能看到大模型 prompt、响应、skill 映射和入队动作；`Server.log` 能看到 C++ 桥是否真正执行；`agent_playerbot_actions` 的 `status/result/error` 是最终真相源。
+`playerbot-agent.log` 能看到大模型 prompt、响应、skill 映射、战斗摘要和入队动作；`Server.log` 能看到 C++ 桥是否真正执行；`agent_playerbot_actions` 的 `status/result/error` 是动作真相源；`agent_playerbot_combat_summaries` 是战斗记忆真相源。
 
 ## 当前可调用本能速查
 

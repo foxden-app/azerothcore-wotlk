@@ -86,9 +86,12 @@ mysql -h127.0.0.1 -P3306 -uacore -pacore --default-character-set=utf8mb4 acore_p
 
 mysql -h127.0.0.1 -P3306 -uacore -pacore --default-character-set=utf8mb4 acore_playerbots \
   -e "SELECT id, source_event_id, status, bot_name, action_type, channel, text, command, strategy, bot_state, result, error FROM agent_playerbot_actions ORDER BY id DESC LIMIT 20\\G"
+
+mysql -h127.0.0.1 -P3306 -uacore -pacore --default-character-set=utf8mb4 acore_playerbots \
+  -e "SELECT id, created_at, group_leader_name, duration_ms, kills, deaths, summary_text, LEFT(facts_json, 1200) AS facts FROM agent_playerbot_combat_summaries ORDER BY id DESC LIMIT 5\\G"
 ```
 
-`playerbot-agent.log` 是大脑侧日志，会记录 `chat_event`、`llm_prompt`、`llm_response`、`llm_skill_mapping`、`decision`、`action_enqueued`。`Server.log` 是小脑执行日志，会记录动作是否执行成 `done`，或被权限/白名单挡成 `error`。数据库里的 `agent_playerbot_actions.status/result/error` 是最终真相源。
+`playerbot-agent.log` 是大脑侧日志，会记录 `chat_event`、`llm_prompt`、`llm_response`、`llm_skill_mapping`、`combat_summary_seen`、`combat_memory_used`、`decision`、`action_enqueued`。`Server.log` 是小脑执行日志，会记录动作是否执行成 `done`，或被权限/白名单挡成 `error`。数据库里的 `agent_playerbot_actions.status/result/error` 是动作真相源，`agent_playerbot_combat_summaries.summary_text/facts_json` 是战斗记忆真相源。
 
 进入 worldserver 控制台：
 
@@ -132,6 +135,7 @@ export PLAYERBOT_AGENT_LLM_THINKING=disabled
 export PLAYERBOT_AGENT_LLM_MAX_TOKENS=512
 export PLAYERBOT_AGENT_TRACE=1
 export PLAYERBOT_AGENT_TRACE_PROMPT=1
+export PLAYERBOT_AGENT_COMBAT_MEMORY_LIMIT=3
 ```
 
 DeepSeek V4 Flash 当前建议显式关闭 thinking，避免把输出预算花在思考过程上，导致侧车拿到空 `content`。侧车也会在检测到 `https://api.deepseek.com` + `deepseek-v4*` 时默认补上 `thinking={"type":"disabled"}`。其他 OpenAI-compatible 模型可以不设置 `PLAYERBOT_AGENT_LLM_THINKING`。
@@ -155,6 +159,7 @@ worldserver 首次启动新模块时会自动创建：
 ```text
 agent_playerbot_events
 agent_playerbot_actions
+agent_playerbot_combat_summaries
 ```
 
 v1 只执行三类动作：
@@ -162,6 +167,7 @@ v1 只执行三类动作：
 - `reply`：bot 以队伍/密语/附近说话回复。
 - `command`：白名单 Playerbots 聊天快捷命令。
 - `strategy`：白名单策略开关。
+- `combat_summary`：C++ 聚合战斗事实，Python 侧车压缩成短战斗记忆，供下一次 Agent 判断使用。
 
 ## 主机资源
 
