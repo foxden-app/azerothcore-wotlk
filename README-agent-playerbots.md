@@ -51,6 +51,53 @@ warrior paladin hunter rogue priest shaman mage warlock druid dk
 
 当前配置里随机机器人系统是关闭的，所以不会自动刷一堆 bot 上线。先按需召唤，方便看资源和行为质量。
 
+## 试玩建议
+
+当前服已经设成“可玩、可召唤 bot”的保守模式：
+
+- Realm 选 `Agent PlayerBot`。
+- 旧测试服账号已经复用，角色已迁移到当前角色库。
+- 随机 bot 生态关闭，不会自动刷满世界。
+- AddClass bot 池开启，普通玩家可按需召唤。
+- 治疗输出策略默认关闭，治疗 bot 会更偏治疗/驱散/跟随，少做输出抢仇恨。
+
+已迁移角色：
+
+```text
+WUYA_TEST: 小猎 Lv1 猎人, 中年狼 Lv1 牧师, 乌鸦 Lv2 法师, Wuya Lv19 战士
+WUGUI:     滑才怪 Lv19 猎人
+XIAOWU:    小宝 Lv2 术士, 小德 Lv19 德鲁伊
+GM:        小管 Lv58 盗贼
+WUJI:      赛博丶执著爱 Lv20 圣骑士
+```
+
+推荐先用 `WUYA_TEST` 的 `Wuya` 战士测试治疗跟随：
+
+```text
+.playerbots bot lookup
+.playerbots bot addclass priest female
+.playerbots bot list
+.playerbots bot init=auto <机器人名>
+```
+
+也可以测试其他治疗：
+
+```text
+.playerbots bot addclass paladin
+.playerbots bot addclass druid
+.playerbots bot addclass shaman
+```
+
+如果 bot 没有按预期跟随，可以对 bot 密语英文快捷指令：
+
+```text
+follow
+stay
+flee
+attack
+pull
+```
+
 ## 当前可调用本能速查
 
 完整能力矩阵见：[ARCHITECTURE-agent-playerbots.md](/home/wuya/git/azerothcore-wotlk-git/ARCHITECTURE-agent-playerbots.md) 的“Playerbots 提供的本能”。

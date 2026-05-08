@@ -100,6 +100,7 @@ AiPlayerbot.RandomBotSuggestDungeons = 0
 AiPlayerbot.AddClassCommand = 1
 AiPlayerbot.AddClassAccountPoolSize = 50
 AiPlayerbot.ApplyInstanceStrategies = 1
+AiPlayerbot.CombatStrategies = "-healer dps"
 AiPlayerbot.CommandServerPort = 0
 ```
 
@@ -117,6 +118,25 @@ MapUpdate.Threads = 1
 PBAGENT* bot 账号: 55
 bot 角色:          550
 AddClass 账号池:   50
+测试迁移真人角色: 9
+```
+
+`AiPlayerbot.CombatStrategies = "-healer dps"` 是当前试玩期的保守设置：治疗 bot 仍会治疗、驱散、保命、喝水和跟随，但默认不额外启用治疗输出策略，降低“治疗跟着战士日常打怪时抢仇恨”的概率。后续如果要测试更激进的效率，可以改回空字符串或由 Adapter 按场景切换策略。
+
+已从旧测试角色库 `acore_agent_characters` 通过 AzerothCore `pdump` 迁移到当前 `acore_playerbot_characters`：
+
+| 账号 | 角色 |
+| --- | --- |
+| `WUYA_TEST` | `小猎` Lv1 猎人、`中年狼` Lv1 牧师、`乌鸦` Lv2 法师、`Wuya` Lv19 战士 |
+| `WUGUI` | `滑才怪` Lv19 猎人 |
+| `XIAOWU` | `小宝` Lv2 术士、`小德` Lv19 德鲁伊 |
+| `GM` | `小管` Lv58 盗贼 |
+| `WUJI` | `赛博丶执著爱` Lv20 圣骑士 |
+
+迁移前备份保存在：
+
+```text
+/home/wuya/backups/azerothcore-wotlk-git/playerbot-test-migration-20260508/
 ```
 
 ## Playerbots 提供的本能
@@ -185,6 +205,17 @@ rogue:   melee, dps, dps assist, aoe
 warlock: affli, demo, destro, curse, cc, aoe, pet
 dk:      blood, frost, unholy, tank assist, pull, aoe
 ```
+
+“战士玩家 + 治疗 bot 跟随打怪”的主要实现位置：
+
+| 行为 | 代码位置 | 说明 |
+| --- | --- | --- |
+| 按职业/天赋挂默认战斗策略 | `modules/mod-playerbots/src/Bot/Factory/AiFactory.cpp` | 牧师非暗影挂 `heal`/`holy heal`，奶骑/奶德/奶萨挂治疗策略；治疗角色还会挂 `save mana`，当前运行配置再移除 `healer dps`。 |
+| 牧师治疗触发器 | `modules/mod-playerbots/src/Ai/Class/Priest/Strategy/HealPriestStrategy.cpp` | 根据队友血量触发盾、愈合祷言、苦修、快速治疗、治疗祷言、痛苦压制等。 |
+| 仇恨抑制 | `modules/mod-playerbots/src/Ai/Base/Strategy/ThreatStrategy.cpp` | `+threat` 策略被启用时，组队状态下高仇恨动作会被降权；牧师默认在中等仇恨时触发 `fade`。 |
+| 跟随/停留/拉怪等指令 | `modules/mod-playerbots/src/Ai/Base/Strategy/ChatCommandHandlerStrategy.cpp` | 支持 `follow`、`stay`、`attack`、`pull`、`flee`、`ready` 等 bot 聊天快捷指令。 |
+
+这些能力可以被包装：上层 Adapter 不需要调用“快速治疗”这种单个技能，只需要控制 `summon_bot`、`init_bot`、`bot_follow`、`bot_stay`、`bot_attack_target`、`set_strategy` 这类低频意图。
 
 ### L3：底层已有但需要 Adapter 包装的可控本能
 
