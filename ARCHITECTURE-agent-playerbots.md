@@ -4,6 +4,8 @@
 
 本文件是当前 `playerbot-agent` 分支的架构真相源。部署拓扑、数据库归属、端口、模块边界、Agent 分层和关键设计变化，都以这里为准。
 
+后续 Harness / Planner Agent、Intent Schema 和阶段路线图见：[ROADMAP-agent-playerbots.md](/home/wuya/git/azerothcore-wotlk-git/ROADMAP-agent-playerbots.md)。
+
 不要把 API key、bearer token、数据库密码或其他密钥写进本文档。
 
 ## 当前结论
@@ -18,7 +20,7 @@ modules/mod-playerbot-agent
   - 捕获真实玩家聊天
   - 把事件写入 acore_playerbots.agent_playerbot_events
   - 轮询 acore_playerbots.agent_playerbot_actions
-  - 只执行 reply / command / strategy 三类白名单动作
+  - 执行 reply / command / strategy 以及队伍生命周期强类型白名单动作
 
 tools/playerbot-agent/agent_bridge.py
   - Python 侧车大脑
@@ -102,20 +104,26 @@ id=2  Agent PlayerBot   38.207.189.99:8086
 
 ## 当前运行策略
 
-本服先按“Agent 可调度 bot 池”运行，而不是“随机机器人生态服”运行。
+本服按“可控 AddClass 小队 + 轻量随机世界 bot”运行。AddClass bot 是玩家/Agent 可调度的小队成员；随机世界 bot 用于营造活跃世界，并允许真人密语触发 LLM 闲聊，但不允许 LLM 控制其移动、战斗、治疗或拾取。
 
 关键配置：
 
 ```text
 AiPlayerbot.Enabled = 1
-AiPlayerbot.RandomBotAutologin = 0
-AiPlayerbot.MinRandomBots = 0
-AiPlayerbot.MaxRandomBots = 0
-AiPlayerbot.RandomBotLoginAtStartup = 0
-AiPlayerbot.RandomBotJoinLfg = 0
-AiPlayerbot.RandomBotJoinBG = 0
-AiPlayerbot.RandomBotTalk = 0
-AiPlayerbot.RandomBotSuggestDungeons = 0
+AiPlayerbot.RandomBotAutologin = 1
+AiPlayerbot.MinRandomBots = 30
+AiPlayerbot.MaxRandomBots = 50
+AiPlayerbot.DisabledWithoutRealPlayer = 0
+AiPlayerbot.PlayerHotspotBots = 1
+AiPlayerbot.PlayerHotspotMinBots = 6
+AiPlayerbot.PlayerHotspotMaxBots = 10
+AiPlayerbot.PlayerHotspotRadius = 120
+AiPlayerbot.PlayerHotspotCooldown = 600
+AiPlayerbot.PlayerHotspotScanInterval = 30
+AiPlayerbot.RandomBotJoinLfg = 1
+AiPlayerbot.RandomBotJoinBG = 1
+AiPlayerbot.RandomBotTalk = 1
+AiPlayerbot.RandomBotSuggestDungeons = 1
 AiPlayerbot.AddClassCommand = 1
 AiPlayerbot.AddClassAccountPoolSize = 50
 AiPlayerbot.ApplyInstanceStrategies = 1
@@ -264,13 +272,13 @@ dk:      blood, frost, unholy, tank assist, pull, aoe
 
 ### L4：当前默认关闭或不建议暴露的能力
 
-这些能力在模块里存在，但和当前“Agent 可调度 bot 池”目标不一致，或者资源/安全风险较高。
+这些能力在模块里存在，但不是普通 LLM-Agent 能自由调用的控制面，或者资源/安全风险较高。
 
 | 能力 | 当前状态 | 原因 |
 | --- | --- | --- |
-| 随机 bot 自动上线 | `AiPlayerbot.RandomBotAutologin = 0`，`MinRandomBots = 0`，`MaxRandomBots = 0` | 空服跑随机生态会显著增加 CPU/内存和数据库负载。 |
-| 随机 bot 自动进 LFG/BG/竞技场 | `RandomBotJoinLfg = 0`，`RandomBotJoinBG = 0` | 会制造大量后台活动，先不用于 Agent 小队测试。 |
-| 随机 bot 世界/公会/交易频道聊天 | `RandomBotTalk = 0`，相关广播概率不作为入口 | 容易干扰真实玩家和 Agent 聊天测试。 |
+| 随机 bot 自动上线 | 已开启 30 到 50 个，并增加 `PlayerHotspotBots` 把空闲 bot 调度到真人附近 | 用于世界氛围；不是 LLM 可控 bot 池。 |
+| 随机 bot 自动进 LFG/BG/竞技场 | 当前允许 LFG/BG 行为，数量受 30 到 50 总量限制 | 用于观察生态，资源压力异常时优先降这里。 |
+| 随机 bot 世界/公会/交易频道聊天 | 已打开基础随机聊天；真人密语随机 bot 会进入 LLM reply-only 流程 | 随机 bot 只可闲聊，不允许控制动作。 |
 | `.playerbots rndbot ...` | GM/控制台能力：`stats`、`reload`、`update`、`reset`、`init`、`clear`、`level`、`refresh`、`teleport`、`revive`、`grind`、`change_strategy` | 这是随机生态维护接口，不是普通 Agent 本能。需要测试随机生态时单独打开。 |
 | `.playerbots gtask ...` | GM 公会任务维护 | 不属于小队本能。 |
 | `.playerbots pmon/debug ...` | 性能监控/调试 | 运维工具，不给 LLM。 |
@@ -279,7 +287,9 @@ dk:      blood, frost, unholy, tank assist, pull, aoe
 
 ### 第一批建议暴露给 LLM-Agent 的本能 API
 
-第一阶段 v1 已实现的是“聊天 + 指挥队伍内 AddClass bot”，不包含召唤、删除、初始化 bot。原因是这些 `.playerbots bot ...` 命令需要玩家会话上下文，不能安全地让 Python 侧车通过 SOAP 控制；v1 先把已经在线/已入队的 bot 变成可聊天、可指挥的小队成员。
+第一阶段 v1 已实现的是“聊天 + 指挥队伍内 AddClass bot”。v2 已把队伍生命周期动作补成 C++ 强类型白名单动作，不再让 Python 侧车通过 SOAP 或原始命令直接控制。
+
+v1.2 增加随机世界 bot 的密语闲聊：C++ 事件上下文会标注 `bot_kind`，包括 `owned`、`group`、`random_world`、`addclass_world`。当真人密语 `random_world/addclass_world` 这类非可控世界 bot 时，Python 侧车只向 LLM 暴露 `reply/no_reply`，C++ 执行层也只对 `reply` 放宽到任意在线 Playerbot；`command/strategy` 仍必须是 owned/group bot。
 
 | Skill | 底层小脑语言 | 说明 |
 | --- | --- | --- |
@@ -302,7 +312,7 @@ dk:      blood, frost, unholy, tank assist, pull, aoe
 | `healer_safe` | `-healer dps` | 治疗专心奶，降低抢仇恨风险。 |
 | `healer_burst` | `+healer dps` | 允许治疗补输出。 |
 
-第二阶段再补召唤和队伍生命周期：
+v2 已支持的队伍生命周期动作：
 
 ```text
 summon_bot(role, class_hint, gender?)
@@ -312,6 +322,7 @@ lookup_bot_pool()
 init_bot(bot_name, mode="auto")
 refresh_bot(bot_name)
 level_bot(bot_name)
+init_instance_quests(bot_name)
 invite_player(player_name)
 ```
 
@@ -414,7 +425,7 @@ invite_player(target_player)
 
 优点：不需要让 Python 伪造玩家会话；bot 可以以自己的身份说话；Playerbots 仍然负责具体战斗和移动。
 
-限制：v1 只对在线队伍 bot 生效；不让 LLM 自由拼英文命令；召唤/删除/初始化仍由玩家手动 `.playerbots bot ...` 操作。
+限制：控制类动作只对 owned/group bot 生效；随机世界 bot 只能密语闲聊；不让 LLM 自由拼英文命令；召唤/删除/初始化仍由玩家手动 `.playerbots bot ...` 操作。
 
 当前 LLM 运行时使用 OpenAI-compatible Chat Completions。DeepSeek Flash 的推荐配置是：
 

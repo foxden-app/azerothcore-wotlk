@@ -1,0 +1,19 @@
+[Unit]
+Description=AzerothCore PlayerBot World Server
+After=network-online.target mysql.service azerothcore-auth.service
+Wants=network-online.target mysql.service
+
+[Service]
+Type=simple
+User=wuya
+Group=wuya
+WorkingDirectory=/home/wuya/git/azerothcore-wotlk-git/env/dist/bin
+ExecStart=/home/wuya/git/azerothcore-wotlk-git/env/dist/bin/worldserver --config /home/wuya/git/azerothcore-wotlk-git/env/dist/etc/worldserver.conf
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=120
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

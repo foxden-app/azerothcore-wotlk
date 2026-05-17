@@ -2,6 +2,8 @@
 
 架构和部署真相源见：[ARCHITECTURE-agent-playerbots.md](/home/wuya/git/azerothcore-wotlk-git/ARCHITECTURE-agent-playerbots.md)。
 
+Harness / Planner Agent、Intent 接口和阶段路线图见：[ROADMAP-agent-playerbots.md](/home/wuya/git/azerothcore-wotlk-git/ROADMAP-agent-playerbots.md)。
+
 本分支当前目标：先把成熟的 `mod-playerbots` 跑成稳定的“机器人本能层”，再接入 LLM-Agent 做中文聊天理解、队伍意图识别和宏观调度。
 
 ## 当前状态
@@ -13,17 +15,18 @@
 - 新增 `modules/mod-playerbot-agent` 游戏内薄桥。
 - 新增 `tools/playerbot-agent/agent_bridge.py` Python 侧车。
 - 建立独立数据库：`acore_playerbot_world`、`acore_playerbot_characters`、`acore_playerbots`。
-- 复用生产 `acore_auth`，新增 Realm `Agent PlayerBot`，端口 `8086`。
+- 复用生产 `acore_auth`，新增 Realm `Agent PlayerBot`，端口 `8085`。
 - 生成 `PBAGENT*` bot 账号和 AddClass bot 池。
-- 关闭随机 bot 自动上线，避免空服跑随机生态。
-- 保留 AddClass 能力，作为后续 Agent 按需召唤 bot 的入口。
+- 已开启轻量随机世界 bot 生态，当前目标是 30 到 50 个，并把 6 到 10 个空闲随机 bot 调度到真实玩家附近。
+- 保留 AddClass 能力，作为玩家按需召唤、组队和控制 bot 的入口。
 - 已实现第一批中文指挥 skill：跟随、停下、撤退、攻击、拉怪、重点治疗、拾取策略、buff 策略、治疗安全/补输出。
 - 已接入环境/战斗感知：聊天 prompt 会带当前队伍状态、目标、附近敌人、最近 action 结果和最近战斗摘要。
+- 随机世界 bot 被真人密语时会进入 LLM 闲聊回复，但只允许 `reply/no_reply`，不会执行跟随、治疗、拾取等控制动作。
+- 已实现 v2 队伍生命周期强类型动作：`summon_bot`、`init_bot`、`dismiss_bot`、`list_bots`、`lookup_bot_pool`、`refresh_bot`、`level_bot`、`init_instance_quests`、`invite_player`。
+- 无现成 bot 的队伍/附近聊天也能触发生命周期 intent，例如“加个奶”“看看机器人池子”。
 
 还没完成：
 
-- 还没有把“召唤/删除/初始化 bot”交给 LLM-Agent 自动执行。
-- 还没有实现邀请真实玩家进队。
 - 还没有做长期跨天记忆、任务规划、背包/装备策略。
 
 ## 怎么玩
@@ -67,7 +70,10 @@ druid   德鲁伊/治疗
 dk      死亡骑士
 ```
 
-当前配置里随机机器人系统是关闭的，所以不会自动刷一堆 bot 上线。先按需召唤，方便看资源和行为质量。
+当前配置同时跑两类 bot：
+
+- AddClass bot：你用 `.playerbots bot addclass ...` 召唤出来的队友，可组队、跟随、治疗、拾取，也能被 Agent skill 调控。
+- 随机世界 bot：自动上线，让世界热闹起来。服务器会把一部分空闲随机 bot 调度到真人玩家附近；你可以密语他们闲聊，但他们不是你的可控队友。
 
 ## 试玩建议
 
@@ -75,7 +81,7 @@ dk      死亡骑士
 
 - Realm 选 `Agent PlayerBot`。
 - 旧测试服账号已经复用，角色已迁移到当前角色库。
-- 随机 bot 生态关闭，不会自动刷满世界。
+- 随机 bot 生态已轻量开启，默认不会刷到 500 个。
 - AddClass bot 池开启，普通玩家可按需召唤。
 - 治疗输出策略默认关闭，治疗 bot 会更偏治疗/驱散/跟随，少做输出抢仇恨。
 
@@ -133,6 +139,16 @@ pull
 牧师跟我
 牧师停一下
 治疗加我
+加个奶
+加个坦
+我想下副本，组个稳一点的队
+看看机器人池子
+小牧初始化一下
+刷新小牧
+小牧同步等级
+给小牧初始化副本任务
+小牧下线
+邀请张三进队
 安心奶，别输出
 捡垃圾
 别捡了
@@ -143,25 +159,40 @@ pull
 
 这些话会先进入 `mod-playerbot-agent`，再由 Python 侧车转成白名单动作。没有配置大模型时，规则模式也能处理上面的常用指令。
 
-启动侧车：
+随机世界 bot 的玩法更像路人 NPC：
+
+```text
+/w 路人bot名 晚上好
+/w 路人bot名 你在干嘛
+```
+
+这类密语会带上说话玩家、目标 bot、附近敌人、地图/区域、最近战斗摘要等上下文给 LLM。因为他们是世界随机 bot，Adapter 只开放 `reply/no_reply`，所以“跟我”“加我”“全捡”不会变成控制动作。
+
+侧车已经有独立 systemd 服务，和 auth/worldserver 平级。环境变量统一放在 `env/dist/etc/playerbot-agent.env`，首次安装服务时可从模板复制：
 
 ```bash
 cd /home/wuya/git/azerothcore-wotlk-git
-PLAYERBOT_AGENT_DB_DSN='127.0.0.1;3306;acore;acore;acore_playerbots' \
-  python3 tools/playerbot-agent/agent_bridge.py --rule-only
+test -f env/dist/etc/playerbot-agent.env || install -m 0600 ops/systemd/playerbot-agent.env.dist env/dist/etc/playerbot-agent.env
+sudo install -m 0644 ops/systemd/azerothcore-playerbot-agent.service /etc/systemd/system/azerothcore-playerbot-agent.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now azerothcore-playerbot-agent.service
 ```
 
-接 LLM 时增加：
+默认 env 是规则模式。接 LLM 时编辑 `env/dist/etc/playerbot-agent.env`：
 
 ```bash
-OPENAI_API_KEY=...
-OPENAI_BASE_URL=https://api.deepseek.com
-PLAYERBOT_AGENT_MODEL=deepseek-v4-flash
-PLAYERBOT_AGENT_LLM_THINKING=disabled
-PLAYERBOT_AGENT_LLM_MAX_TOKENS=512
+PLAYERBOT_AGENT_RULE_ONLY="0"
+OPENAI_API_KEY="..."
+OPENAI_BASE_URL="https://api.deepseek.com"
+PLAYERBOT_AGENT_MODEL="deepseek-v4-flash"
+PLAYERBOT_AGENT_LLM_THINKING="enabled"
+PLAYERBOT_AGENT_LLM_MAX_TOKENS="2048"
+PLAYERBOT_AGENT_TRACE_PROMPT="1"
+PLAYERBOT_AGENT_TRACE_REASONING="1"
+PLAYERBOT_AGENT_TRACE_LLM_RAW="1"
 ```
 
-当前线上侧车已按 DeepSeek Flash 运行；key 只放在进程环境里，不写入仓库。规则能命中的中文指令优先走规则，其他被点名/密语的闲聊和复杂表达再交给 LLM 输出 JSON，再由 Adapter 翻译成白名单本能动作。
+改完后执行 `sudo systemctl restart azerothcore-playerbot-agent.service`。key 只放在本机 env 文件里，不写入仓库。`PLAYERBOT_AGENT_LLM_THINKING` 可写 `enabled/enable` 或 `disabled/disable`；开启 thinking 时，侧车只把最终 `content` 当作 JSON 决策输入，`reasoning_content` 只进日志，不会直接发到游戏频道。规则能命中的中文指令优先走规则，其他被点名/密语的闲聊和复杂表达再交给 LLM 输出 JSON，再由 Adapter 翻译成白名单本能动作。
 
 调试时看三处：
 
@@ -169,7 +200,7 @@ PLAYERBOT_AGENT_LLM_MAX_TOKENS=512
 tail -f env/dist/logs/playerbot-agent.log
 tail -f env/dist/logs/Server.log | rg 'module.playerbot_agent|Playerbot Agent'
 mysql -h127.0.0.1 -P3306 -uacore -pacore --default-character-set=utf8mb4 acore_playerbots \
-  -e "SELECT id, source_event_id, status, bot_name, action_type, channel, text, command, strategy, bot_state, result, error FROM agent_playerbot_actions ORDER BY id DESC LIMIT 20\\G"
+  -e "SELECT id, source_event_id, status, bot_name, action_type, channel, text, command, strategy, bot_state, payload_json, result, error FROM agent_playerbot_actions ORDER BY id DESC LIMIT 20\\G"
 
 mysql -h127.0.0.1 -P3306 -uacore -pacore --default-character-set=utf8mb4 acore_playerbots \
   -e "SELECT id, created_at, group_leader_name, duration_ms, kills, deaths, summary_text, LEFT(facts_json, 1000) AS facts FROM agent_playerbot_combat_summaries ORDER BY id DESC LIMIT 5\\G"
@@ -213,7 +244,7 @@ mysql -h127.0.0.1 -P3306 -uacore -pacore --default-character-set=utf8mb4 acore_p
 | “捡垃圾/全捡/别捡” | `loot_gray` / `loot_all` / `loot_off` | `ll gray/all` 或 `-loot` |
 | “补buff/别补buff” | `buff_on` / `buff_off` | `+buff` / `-buff` |
 
-随机 bot 生态、自动 LFG/BG、世界/公会频道聊天、`rndbot`、`gtask`、`pmon/debug`、账号绑定等能力当前不作为 LLM-Agent 可自由调用的本能。
+随机世界 bot 生态现在用于“热闹”和闲聊，但不作为 LLM-Agent 可自由控制的本能。自动 LFG/BG、`rndbot`、`gtask`、`pmon/debug`、账号绑定等仍是运维/GM 能力，不给 LLM 自由调用。
 
 ## 为什么把 Playerbots 当本能
 
@@ -293,13 +324,12 @@ Agent 适配器再把它翻译成 Playerbots 命令或 C++ API：
 
 ## 下一步开发
 
-优先顺序：
+当前已完成最薄的 Agent Intent Adapter 和 v2 生命周期动作。下一步优先做：
 
-1. 做一个最薄的 Agent Intent Adapter。
-2. 捕获密语/队伍聊天，把中文请求转成结构化 intent。
-3. 先支持 `summon_bot`、`dismiss_bot`、`list_bots`、`init_bot`。
-4. 再支持 `invite_player`、`follow_player`、`set_strategy`。
-5. 最后接入 LLM 人设、长期记忆和复盘。
+1. 把“召唤后初始化/跟随”升级成显式多 intent 计划，而不是只召唤。
+2. 增加动作冷却和更细的去重，避免重复聊天触发重复召唤。
+3. 增加 Planner/Harness 层，让 LLM 输出 `Intent Plan` 而不是单个 skill。
+4. 接入长期跨天记忆、任务规划、背包/装备策略。
 
 阶段目标：
 

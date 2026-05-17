@@ -1,0 +1,19 @@
+[Unit]
+Description=AzerothCore PlayerBot Auth Server
+After=network-online.target mysql.service
+Wants=network-online.target mysql.service
+
+[Service]
+Type=simple
+User=wuya
+Group=wuya
+WorkingDirectory=/home/wuya/git/azerothcore-wotlk-git/env/dist/bin
+ExecStart=/home/wuya/git/azerothcore-wotlk-git/env/dist/bin/authserver --config /home/wuya/git/azerothcore-wotlk-git/env/dist/etc/authserver.conf
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=90
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

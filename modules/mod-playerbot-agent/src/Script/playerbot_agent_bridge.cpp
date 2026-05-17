@@ -11,19 +11,23 @@
 #include "Config.h"
 #include "Creature.h"
 #include "DatabaseEnv.h"
+#include "DBCStores.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
 #include "Group.h"
 #include "Log.h"
+#include "Map.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "PlayerScript.h"
 #include "PlayerbotAI.h"
 #include "PlayerbotMgr.h"
 #include "Playerbots.h"
+#include "RandomPlayerbotMgr.h"
 #include "ScriptMgr.h"
 #include "GameTime.h"
 #include "UnitScript.h"
+#include "World.h"
 #include "WorldScript.h"
 #include "WorldSession.h"
 
@@ -36,6 +40,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -63,6 +68,15 @@ std::string ToLowerAscii(std::string value)
 bool StartsWith(std::string const& value, std::string const& prefix)
 {
     return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
+}
+
+bool ContainsAny(std::string const& value, std::vector<std::string> const& tokens)
+{
+    for (std::string const& token : tokens)
+        if (!token.empty() && value.find(token) != std::string::npos)
+            return true;
+
+    return false;
 }
 
 std::string SqlQuote(std::string value)
@@ -127,12 +141,140 @@ std::string JsonEscape(std::string const& value)
     return out.str();
 }
 
+std::string JsonUnescape(std::string const& value)
+{
+    std::ostringstream out;
+    for (std::size_t i = 0; i < value.size(); ++i)
+    {
+        if (value[i] != '\\' || i + 1 >= value.size())
+        {
+            out << value[i];
+            continue;
+        }
+
+        char next = value[++i];
+        switch (next)
+        {
+            case '"':
+                out << '"';
+                break;
+            case '\\':
+                out << '\\';
+                break;
+            case '/':
+                out << '/';
+                break;
+            case 'b':
+                out << '\b';
+                break;
+            case 'f':
+                out << '\f';
+                break;
+            case 'n':
+                out << '\n';
+                break;
+            case 'r':
+                out << '\r';
+                break;
+            case 't':
+                out << '\t';
+                break;
+            default:
+                out << next;
+                break;
+        }
+    }
+
+    return out.str();
+}
+
+bool ExtractJsonString(std::string const& json, std::string const& key, std::string& value)
+{
+    value.clear();
+    std::string needle = "\"" + key + "\"";
+    std::size_t pos = json.find(needle);
+    if (pos == std::string::npos)
+        return false;
+
+    pos = json.find(':', pos + needle.size());
+    if (pos == std::string::npos)
+        return false;
+
+    ++pos;
+    while (pos < json.size() && std::isspace(static_cast<unsigned char>(json[pos])))
+        ++pos;
+
+    if (json.compare(pos, 4, "null") == 0)
+        return true;
+
+    if (pos >= json.size() || json[pos] != '"')
+        return false;
+
+    ++pos;
+    std::ostringstream raw;
+    bool escaping = false;
+    for (; pos < json.size(); ++pos)
+    {
+        char c = json[pos];
+        if (escaping)
+        {
+            raw << '\\' << c;
+            escaping = false;
+            continue;
+        }
+
+        if (c == '\\')
+        {
+            escaping = true;
+            continue;
+        }
+
+        if (c == '"')
+        {
+            value = JsonUnescape(raw.str());
+            return true;
+        }
+
+        raw << c;
+    }
+
+    return false;
+}
+
+std::string JoinMessages(std::vector<std::string> const& messages)
+{
+    std::ostringstream out;
+    for (std::size_t i = 0; i < messages.size(); ++i)
+    {
+        if (i)
+            out << "\n";
+        out << messages[i];
+    }
+
+    return out.str();
+}
+
+bool LooksLikeLifecycleRequest(std::string const& message)
+{
+    std::string lowered = ToLowerAscii(message);
+    static std::vector<std::string> const lifecycleTokens = {
+        "加个", "来个", "补个", "组个", "加一个", "来一个", "补一个",
+        "机器人", "bot", "bots", "lookup", "list", "init", "refresh", "levelup",
+        "初始化", "刷新", "同步等级", "升级", "副本", "下本", "下副本", "邀请", "进队", "入队"
+    };
+
+    return ContainsAny(lowered, lifecycleTokens);
+}
+
 struct BotSnapshot
 {
     uint32 guid = 0;
     std::string name;
+    std::string kind;
     uint8 playerClass = 0;
+    uint8 race = 0;
     uint8 level = 0;
+    uint32 team = 0;
     std::string role;
     float healthPct = 0.0f;
     uint32 manaPct = 0;
@@ -143,6 +285,9 @@ struct BotSnapshot
     uint32 mapId = 0;
     uint32 zoneId = 0;
     uint32 areaId = 0;
+    std::string mapName;
+    std::string zoneName;
+    std::string areaName;
     std::string targetName;
     bool targetHostile = false;
     bool hasTargetDistance = false;
@@ -153,6 +298,67 @@ std::string FloatString(float value)
 {
     std::ostringstream out;
     out << std::fixed << std::setprecision(1) << value;
+    return out.str();
+}
+
+LocaleConstant DefaultLocale()
+{
+    return sWorld ? sWorld->GetDefaultDbcLocale() : LOCALE_enUS;
+}
+
+std::string AreaName(uint32 areaId)
+{
+    AreaTableEntry const* area = sAreaTableStore.LookupEntry(areaId);
+    if (!area)
+        return "";
+
+    char const* name = area->area_name[DefaultLocale()];
+    if (!name || !*name)
+        name = area->area_name[LOCALE_enUS];
+
+    return name ? name : "";
+}
+
+std::string MapName(Player* player)
+{
+    if (!player)
+        return "";
+
+    if (Map* map = player->FindMap())
+        return map->GetMapName();
+
+    MapEntry const* entry = sMapStore.LookupEntry(player->GetMapId());
+    if (!entry)
+        return "";
+
+    char const* name = entry->name[DefaultLocale()];
+    if (!name || !*name)
+        name = entry->name[LOCALE_enUS];
+
+    return name ? name : "";
+}
+
+std::string LocationToJson(Player* player)
+{
+    if (!player)
+        return "null";
+
+    uint32 mapId = player->GetMapId();
+    uint32 zoneId = player->GetZoneId();
+    uint32 areaId = player->GetAreaId();
+
+    std::ostringstream out;
+    out << "{\"map_id\":" << mapId
+        << ",\"map_name\":\"" << JsonEscape(MapName(player)) << "\""
+        << ",\"zone_id\":" << zoneId
+        << ",\"zone_name\":\"" << JsonEscape(AreaName(zoneId)) << "\""
+        << ",\"area_id\":" << areaId
+        << ",\"area_name\":\"" << JsonEscape(AreaName(areaId)) << "\""
+        << ",\"x\":" << FloatString(player->GetPositionX())
+        << ",\"y\":" << FloatString(player->GetPositionY())
+        << ",\"z\":" << FloatString(player->GetPositionZ())
+        << ",\"orientation\":" << FloatString(player->GetOrientation())
+        << ",\"precision\":\"server_area_table\"}";
     return out.str();
 }
 
@@ -233,6 +439,43 @@ bool IsRealPlayer(Player* player)
 bool IsPlayerbot(Player* player)
 {
     return player && GET_PLAYERBOT_AI(player) != nullptr;
+}
+
+bool IsOwnedBot(Player* requester, Player* bot)
+{
+    if (!requester || !bot || !IsPlayerbot(bot))
+        return false;
+
+    if (PlayerbotMgr* mgr = GET_PLAYERBOT_MGR(requester))
+        return mgr->GetPlayerBot(bot->GetGUID()) == bot;
+
+    return false;
+}
+
+bool IsGroupedBot(Player* requester, Player* bot)
+{
+    return requester && bot && IsPlayerbot(bot) && requester->GetGroup() && bot->GetGroup() &&
+           requester->GetGroup() == bot->GetGroup();
+}
+
+std::string ClassifyBotForSpeaker(Player* speaker, Player* bot)
+{
+    if (!IsPlayerbot(bot))
+        return "";
+
+    if (IsOwnedBot(speaker, bot))
+        return "owned";
+
+    if (IsGroupedBot(speaker, bot))
+        return "group";
+
+    if (sRandomPlayerbotMgr.IsRandomBot(bot))
+        return "random_world";
+
+    if (sRandomPlayerbotMgr.IsAddclassBot(bot))
+        return "addclass_world";
+
+    return "playerbot";
 }
 
 std::string DetectRole(Player* bot)
@@ -401,13 +644,16 @@ CombatSession* TouchCombatSession(Player* relatedPlayer, uint64 now)
     return &session;
 }
 
-BotSnapshot MakeSnapshot(Player* bot, Player* reference = nullptr)
+BotSnapshot MakeSnapshot(Player* bot, Player* reference = nullptr, std::string const& kind = "")
 {
     BotSnapshot snapshot;
     snapshot.guid = bot->GetGUID().GetCounter();
     snapshot.name = bot->GetName();
+    snapshot.kind = kind.empty() ? ClassifyBotForSpeaker(reference, bot) : kind;
     snapshot.playerClass = bot->getClass();
+    snapshot.race = bot->getRace();
     snapshot.level = bot->GetLevel();
+    snapshot.team = bot->GetTeamId();
     snapshot.role = DetectRole(bot);
     snapshot.healthPct = bot->GetHealthPct();
     snapshot.manaPct = ManaPct(bot);
@@ -416,6 +662,9 @@ BotSnapshot MakeSnapshot(Player* bot, Player* reference = nullptr)
     snapshot.mapId = bot->GetMapId();
     snapshot.zoneId = bot->GetZoneId();
     snapshot.areaId = bot->GetAreaId();
+    snapshot.mapName = MapName(bot);
+    snapshot.zoneName = AreaName(snapshot.zoneId);
+    snapshot.areaName = AreaName(snapshot.areaId);
 
     if (reference && reference->IsInMap(bot))
     {
@@ -437,7 +686,7 @@ BotSnapshot MakeSnapshot(Player* bot, Player* reference = nullptr)
     return snapshot;
 }
 
-void AddUniqueBot(std::vector<BotSnapshot>& bots, Player* bot, Player* reference = nullptr)
+void AddUniqueBot(std::vector<BotSnapshot>& bots, Player* bot, Player* reference = nullptr, std::string const& kind = "")
 {
     if (!IsPlayerbot(bot))
         return;
@@ -449,7 +698,7 @@ void AddUniqueBot(std::vector<BotSnapshot>& bots, Player* bot, Player* reference
     });
 
     if (existing == bots.end())
-        bots.push_back(MakeSnapshot(bot, reference));
+        bots.push_back(MakeSnapshot(bot, reference, kind));
 }
 
 std::vector<BotSnapshot> GetGroupBots(Group* group, Player* reference)
@@ -461,7 +710,7 @@ std::vector<BotSnapshot> GetGroupBots(Group* group, Player* reference)
     for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
     {
         if (Player* member = itr->GetSource())
-            AddUniqueBot(bots, member, reference);
+            AddUniqueBot(bots, member, reference, ClassifyBotForSpeaker(reference, member));
     }
 
     return bots;
@@ -476,7 +725,7 @@ std::vector<BotSnapshot> GetOwnedBots(Player* master)
     if (PlayerbotMgr* mgr = GET_PLAYERBOT_MGR(master))
     {
         for (PlayerBotMap::const_iterator itr = mgr->GetPlayerBotsBegin(); itr != mgr->GetPlayerBotsEnd(); ++itr)
-            AddUniqueBot(bots, itr->second, master);
+            AddUniqueBot(bots, itr->second, master, "owned");
     }
 
     return bots;
@@ -514,8 +763,11 @@ std::string PlayerContextToJson(Player* player, Player* reference)
     out << "{\"guid\":" << player->GetGUID().GetCounter()
         << ",\"name\":\"" << JsonEscape(player->GetName()) << "\""
         << ",\"is_bot\":" << (IsPlayerbot(player) ? "true" : "false")
+        << ",\"bot_kind\":\"" << JsonEscape(IsPlayerbot(player) ? ClassifyBotForSpeaker(reference, player) : "") << "\""
         << ",\"class\":" << static_cast<uint32>(player->getClass())
+        << ",\"race\":" << static_cast<uint32>(player->getRace())
         << ",\"level\":" << static_cast<uint32>(player->GetLevel())
+        << ",\"team\":" << static_cast<uint32>(player->GetTeamId())
         << ",\"role\":\"" << JsonEscape(IsPlayerbot(player) ? DetectRole(player) : "player") << "\""
         << ",\"health_pct\":" << FloatString(player->GetHealthPct())
         << ",\"mana_pct\":" << ManaPct(player)
@@ -523,7 +775,8 @@ std::string PlayerContextToJson(Player* player, Player* reference)
         << ",\"combat\":" << (player->IsInCombat() ? "true" : "false")
         << ",\"map_id\":" << player->GetMapId()
         << ",\"zone_id\":" << player->GetZoneId()
-        << ",\"area_id\":" << player->GetAreaId();
+        << ",\"area_id\":" << player->GetAreaId()
+        << ",\"location\":" << LocationToJson(player);
 
     if (reference && reference != player && reference->IsInMap(player))
         out << ",\"distance\":" << FloatString(reference->GetDistance(player));
@@ -619,8 +872,11 @@ std::string BotSnapshotsToJson(std::vector<BotSnapshot> const& bots)
 
         out << "{\"guid\":" << bot.guid
             << ",\"name\":\"" << JsonEscape(bot.name) << "\""
+            << ",\"bot_kind\":\"" << JsonEscape(bot.kind) << "\""
             << ",\"class\":" << static_cast<uint32>(bot.playerClass)
+            << ",\"race\":" << static_cast<uint32>(bot.race)
             << ",\"level\":" << static_cast<uint32>(bot.level)
+            << ",\"team\":" << bot.team
             << ",\"role\":\"" << JsonEscape(bot.role) << "\""
             << ",\"health_pct\":" << FloatString(bot.healthPct)
             << ",\"mana_pct\":" << bot.manaPct
@@ -628,7 +884,10 @@ std::string BotSnapshotsToJson(std::vector<BotSnapshot> const& bots)
             << ",\"combat\":" << (bot.combat ? "true" : "false")
             << ",\"map_id\":" << bot.mapId
             << ",\"zone_id\":" << bot.zoneId
-            << ",\"area_id\":" << bot.areaId;
+            << ",\"area_id\":" << bot.areaId
+            << ",\"map_name\":\"" << JsonEscape(bot.mapName) << "\""
+            << ",\"zone_name\":\"" << JsonEscape(bot.zoneName) << "\""
+            << ",\"area_name\":\"" << JsonEscape(bot.areaName) << "\"";
 
         if (bot.hasDistance)
             out << ",\"distance_to_speaker\":" << FloatString(bot.distance);
@@ -649,7 +908,7 @@ std::string BotSnapshotsToJson(std::vector<BotSnapshot> const& bots)
     return out.str();
 }
 
-std::string EventMetaToJson(Player* speaker, Group* group, std::vector<BotSnapshot> const& bots)
+std::string EventMetaToJson(Player* speaker, Group* group, std::vector<BotSnapshot> const& bots, Player* receiver)
 {
     std::ostringstream out;
     out << "{\"speaker\":" << PlayerContextToJson(speaker, speaker)
@@ -657,10 +916,12 @@ std::string EventMetaToJson(Player* speaker, Group* group, std::vector<BotSnapsh
         << "\"map_id\":" << (speaker ? speaker->GetMapId() : 0)
         << ",\"zone_id\":" << (speaker ? speaker->GetZoneId() : 0)
         << ",\"area_id\":" << (speaker ? speaker->GetAreaId() : 0)
+        << ",\"location\":" << LocationToJson(speaker)
         << ",\"selected_target\":" << (speaker ? TargetToJson(speaker->GetSelectedUnit(), speaker) : "null")
         << ",\"combat_target\":" << (speaker ? TargetToJson(speaker->GetVictim(), speaker) : "null")
         << ",\"nearby_hostiles\":" << NearbyHostilesToJson(speaker)
         << "},\"group_members\":" << GroupMembersToJson(speaker, group)
+        << ",\"target_bot_context\":" << (IsPlayerbot(receiver) ? PlayerContextToJson(receiver, speaker) : "null")
         << ",\"bots\":" << BotSnapshotsToJson(bots)
         << "}";
     return out.str();
@@ -954,12 +1215,23 @@ void EnsureSchema()
         "`command` VARCHAR(255) NULL DEFAULT NULL,"
         "`strategy` VARCHAR(255) NULL DEFAULT NULL,"
         "`bot_state` VARCHAR(16) NULL DEFAULT NULL,"
+        "`payload_json` TEXT NULL DEFAULT NULL,"
         "`result` TEXT NULL DEFAULT NULL,"
         "`error` TEXT NULL DEFAULT NULL,"
         "PRIMARY KEY (`id`),"
         "KEY `idx_agent_playerbot_actions_status` (`status`, `available_at`, `id`),"
         "KEY `idx_agent_playerbot_actions_event` (`source_event_id`)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+    QueryResult payloadColumn = PlayerbotsDatabase.Query(
+        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'agent_playerbot_actions' "
+        "AND COLUMN_NAME = 'payload_json'");
+    if (!payloadColumn || payloadColumn->Fetch()[0].Get<uint64>() == 0)
+    {
+        PlayerbotsDatabase.DirectExecute(
+            "ALTER TABLE `agent_playerbot_actions` ADD COLUMN `payload_json` TEXT NULL DEFAULT NULL AFTER `bot_state`");
+    }
 
     PlayerbotsDatabase.DirectExecute(
         "CREATE TABLE IF NOT EXISTS `agent_playerbot_combat_summaries` ("
@@ -985,9 +1257,9 @@ void EnsureSchema()
 }
 
 void InsertChatEvent(Player* speaker, std::string const& channel, uint32 chatType, std::string const& message,
-                     Player* receiver, Group* group, std::vector<BotSnapshot> bots)
+                     Player* receiver, Group* group, std::vector<BotSnapshot> bots, bool allowEmptyBots = false)
 {
-    if (!AgentEnabled || !SchemaReady || !IsRealPlayer(speaker) || bots.empty())
+    if (!AgentEnabled || !SchemaReady || !IsRealPlayer(speaker) || (!allowEmptyBots && bots.empty()))
         return;
 
     Player* targetBot = IsPlayerbot(receiver) ? receiver : nullptr;
@@ -997,7 +1269,7 @@ void InsertChatEvent(Player* speaker, std::string const& channel, uint32 chatTyp
     uint32 botGuid = targetBot ? targetBot->GetGUID().GetCounter() : 0;
     std::string botName = targetBot ? targetBot->GetName() : "";
     uint32 accountId = speaker->GetSession() ? speaker->GetSession()->GetAccountId() : 0;
-    std::string meta = EventMetaToJson(speaker, group, bots);
+    std::string meta = EventMetaToJson(speaker, group, bots, targetBot);
 
     if (TraceLog)
         LOG_INFO("module.playerbot_agent", "Queued chat event channel={} speaker={} target={} bots={} message={}",
@@ -1019,11 +1291,7 @@ bool IsControlledByRequester(Player* requester, Player* bot)
     if (!requester || !bot || !IsPlayerbot(bot))
         return false;
 
-    if (PlayerbotMgr* mgr = GET_PLAYERBOT_MGR(requester))
-        if (mgr->GetPlayerBot(bot->GetGUID()) == bot)
-            return true;
-
-    return requester->GetGroup() && bot->GetGroup() && requester->GetGroup() == bot->GetGroup();
+    return IsOwnedBot(requester, bot) || IsGroupedBot(requester, bot);
 }
 
 Player* FindControlledBot(Player* requester, uint32 botGuid, std::string const& botName)
@@ -1060,6 +1328,30 @@ Player* FindControlledBot(Player* requester, uint32 botGuid, std::string const& 
             if (member && ToLowerAscii(member->GetName()) == wanted && IsControlledByRequester(requester, member))
                 return member;
         }
+    }
+
+    return nullptr;
+}
+
+Player* FindOnlinePlayerbot(uint32 botGuid, std::string const& botName)
+{
+    if (botGuid)
+    {
+        if (Player* bot = ObjectAccessor::FindPlayer(ObjectGuid::Create<HighGuid::Player>(botGuid)))
+            if (IsPlayerbot(bot))
+                return bot;
+    }
+
+    std::string wanted = ToLowerAscii(botName);
+    if (wanted.empty())
+        return nullptr;
+
+    PlayerBotMap bots = sRandomPlayerbotMgr.GetAllBots();
+    for (PlayerBotMap::const_iterator itr = bots.begin(); itr != bots.end(); ++itr)
+    {
+        Player* bot = itr->second;
+        if (bot && ToLowerAscii(bot->GetName()) == wanted && IsPlayerbot(bot))
+            return bot;
     }
 
     return nullptr;
@@ -1117,6 +1409,305 @@ bool IsAllowedStrategy(std::string const& strategy)
 
     std::string normalized = ToLowerAscii(strategy);
     return std::find(allowedStrategies.begin(), allowedStrategies.end(), normalized) != allowedStrategies.end();
+}
+
+bool IsAllowedBotClass(std::string const& className)
+{
+    static std::vector<std::string> const classes = {
+        "warrior", "paladin", "hunter", "rogue", "priest", "shaman", "mage", "warlock", "druid", "dk"
+    };
+
+    return std::find(classes.begin(), classes.end(), className) != classes.end();
+}
+
+std::string NormalizeClassHint(std::string classHint, std::string const& role)
+{
+    classHint = ToLowerAscii(classHint);
+    if (classHint == "death_knight" || classHint == "death knight")
+        classHint = "dk";
+
+    if (IsAllowedBotClass(classHint))
+        return classHint;
+
+    std::string normalizedRole = ToLowerAscii(role);
+    if (normalizedRole == "healer" || normalizedRole == "heal")
+        return "priest";
+    if (normalizedRole == "tank")
+        return "warrior";
+    if (normalizedRole == "melee_dps")
+        return "rogue";
+
+    return "mage";
+}
+
+bool IsAllowedGender(std::string const& gender)
+{
+    std::string normalized = ToLowerAscii(gender);
+    return normalized.empty() || normalized == "male" || normalized == "female" || normalized == "0" || normalized == "1";
+}
+
+std::string PayloadValue(std::string const& payloadJson, std::string const& key)
+{
+    std::string value;
+    ExtractJsonString(payloadJson, key, value);
+    return value;
+}
+
+std::string PayloadFirstValue(std::string const& payloadJson, std::vector<std::string> const& keys)
+{
+    for (std::string const& key : keys)
+    {
+        std::string value = PayloadValue(payloadJson, key);
+        if (!value.empty())
+            return value;
+    }
+
+    return "";
+}
+
+bool RunPlayerbotMgrCommand(Player* requester, std::string const& args, std::string& result, std::string& error)
+{
+    result.clear();
+    error.clear();
+
+    if (!requester)
+    {
+        error = "requester is not online";
+        return false;
+    }
+
+    PlayerbotMgr* mgr = GET_PLAYERBOT_MGR(requester);
+    if (!mgr)
+    {
+        error = "requester cannot control playerbots";
+        return false;
+    }
+
+    std::vector<char> buffer(args.begin(), args.end());
+    buffer.push_back('\0');
+    std::vector<std::string> messages = mgr->HandlePlayerbotCommand(buffer.data(), requester);
+    result = JoinMessages(messages);
+    if (result.empty())
+        result = "ok";
+
+    std::string normalized = ToLowerAscii(result);
+    if (normalized.find("error") != std::string::npos || normalized.find("failed") != std::string::npos ||
+        normalized.find("not found") != std::string::npos || normalized.find("not allowed") != std::string::npos ||
+        normalized.find("permission") != std::string::npos || normalized.find("unknown command") != std::string::npos ||
+        normalized.find("disabled") != std::string::npos || normalized.find("too low") != std::string::npos ||
+        normalized.find("can not") != std::string::npos || normalized.find("cannot") != std::string::npos ||
+        normalized.find("already in progress") != std::string::npos)
+    {
+        error = result;
+        return false;
+    }
+
+    return true;
+}
+
+bool IsTypedAction(std::string const& normalizedType)
+{
+    static std::vector<std::string> const typedActions = {
+        "summon_bot", "init_bot", "dismiss_bot", "list_bots", "lookup_bot_pool",
+        "refresh_bot", "level_bot", "init_instance_quests", "invite_player"
+    };
+
+    return std::find(typedActions.begin(), typedActions.end(), normalizedType) != typedActions.end();
+}
+
+void CompleteAction(uint64 actionId, bool success, std::string const& result, std::string const& error);
+
+bool ProcessTypedAction(uint64 actionId, Player* requester, std::string const& normalizedType,
+                        std::string const& botName, std::string const& payloadJson)
+{
+    std::string result;
+    std::string error;
+
+    if (normalizedType == "summon_bot")
+    {
+        std::string role = PayloadValue(payloadJson, "role");
+        std::string className = NormalizeClassHint(PayloadValue(payloadJson, "class_hint"), role);
+        std::string gender = PayloadValue(payloadJson, "gender");
+        if (!IsAllowedGender(gender))
+        {
+            CompleteAction(actionId, false, "", "gender is invalid");
+            return true;
+        }
+
+        std::string args = "addclass " + className;
+        if (!gender.empty())
+            args += " " + gender;
+
+        if (!RunPlayerbotMgrCommand(requester, args, result, error))
+            CompleteAction(actionId, false, "", error);
+        else
+            CompleteAction(actionId, true, result, "");
+        return true;
+    }
+
+    if (normalizedType == "init_bot")
+    {
+        std::string targetBot = PayloadFirstValue(payloadJson, {"bot", "target", "bot_name"});
+        if (targetBot.empty())
+            targetBot = botName;
+
+        std::string mode = ToLowerAscii(PayloadValue(payloadJson, "mode"));
+        if (mode.empty())
+            mode = "auto";
+
+        if (mode != "auto")
+        {
+            CompleteAction(actionId, false, "", "only init mode auto is allowed");
+            return true;
+        }
+
+        if (!IsSafeCommandParam(targetBot))
+        {
+            CompleteAction(actionId, false, "", "bot name is invalid");
+            return true;
+        }
+
+        if (!RunPlayerbotMgrCommand(requester, "init=auto " + targetBot, result, error))
+            CompleteAction(actionId, false, "", error);
+        else
+            CompleteAction(actionId, true, result, "");
+        return true;
+    }
+
+    if (normalizedType == "dismiss_bot")
+    {
+        std::string targetBot = PayloadFirstValue(payloadJson, {"bot", "target", "bot_name"});
+        if (targetBot.empty())
+            targetBot = botName;
+
+        if (targetBot == "*")
+        {
+            CompleteAction(actionId, false, "", "dismiss all requires explicit confirmation and is not exposed");
+            return true;
+        }
+
+        if (!IsSafeCommandParam(targetBot))
+        {
+            CompleteAction(actionId, false, "", "bot name is invalid");
+            return true;
+        }
+
+        if (!RunPlayerbotMgrCommand(requester, "remove " + targetBot, result, error))
+            CompleteAction(actionId, false, "", error);
+        else
+            CompleteAction(actionId, true, result, "");
+        return true;
+    }
+
+    if (normalizedType == "list_bots")
+    {
+        if (!RunPlayerbotMgrCommand(requester, "list", result, error))
+            CompleteAction(actionId, false, "", error);
+        else
+            CompleteAction(actionId, true, result, "");
+        return true;
+    }
+
+    if (normalizedType == "lookup_bot_pool")
+    {
+        if (!RunPlayerbotMgrCommand(requester, "lookup", result, error))
+            CompleteAction(actionId, false, "", error);
+        else
+            CompleteAction(actionId, true, result, "");
+        return true;
+    }
+
+    if (normalizedType == "refresh_bot" || normalizedType == "level_bot" || normalizedType == "init_instance_quests")
+    {
+        std::string targetBot = PayloadFirstValue(payloadJson, {"bot", "target", "bot_name"});
+        if (targetBot.empty())
+            targetBot = botName;
+
+        if (!IsSafeCommandParam(targetBot))
+        {
+            CompleteAction(actionId, false, "", "bot name is invalid");
+            return true;
+        }
+
+        std::string commandName;
+        if (normalizedType == "refresh_bot")
+            commandName = "refresh";
+        else if (normalizedType == "level_bot")
+            commandName = "levelup";
+        else
+            commandName = "quests";
+
+        if (!RunPlayerbotMgrCommand(requester, commandName + " " + targetBot, result, error))
+            CompleteAction(actionId, false, "", error);
+        else
+            CompleteAction(actionId, true, result, "");
+        return true;
+    }
+
+    if (normalizedType == "invite_player")
+    {
+        std::string targetName = PayloadFirstValue(payloadJson, {"target_player", "player", "name"});
+        if (!IsSafeCommandParam(targetName))
+        {
+            CompleteAction(actionId, false, "", "target player name is invalid");
+            return true;
+        }
+
+        if (!requester || !requester->GetSession())
+        {
+            CompleteAction(actionId, false, "", "requester is not online");
+            return true;
+        }
+
+        Player* target = ObjectAccessor::FindPlayerByName(targetName, false);
+        if (!target)
+        {
+            CompleteAction(actionId, false, "", "target player is not online");
+            return true;
+        }
+
+        if (target == requester)
+        {
+            CompleteAction(actionId, false, "", "cannot invite self");
+            return true;
+        }
+
+        if (target->GetGroup() || target->GetGroupInvite())
+        {
+            CompleteAction(actionId, false, "", "target player is already grouped or invited");
+            return true;
+        }
+
+        if (!requester->IsGameMaster() && requester->GetTeamId() != target->GetTeamId())
+        {
+            CompleteAction(actionId, false, "", "target player is wrong faction");
+            return true;
+        }
+
+        if (Group* group = requester->GetGroup())
+        {
+            if (!group->IsLeader(requester->GetGUID()) && !group->IsAssistant(requester->GetGUID()))
+            {
+                CompleteAction(actionId, false, "", "requester is not group leader or assistant");
+                return true;
+            }
+
+            if (group->IsFull())
+            {
+                CompleteAction(actionId, false, "", "group is full");
+                return true;
+            }
+        }
+
+        WorldPacket packet;
+        packet << target->GetName();
+        packet << uint32(0);
+        requester->GetSession()->HandleGroupInviteOpcode(packet);
+        CompleteAction(actionId, true, "invite sent to " + target->GetName(), "");
+        return true;
+    }
+
+    return false;
 }
 
 bool ApplyStrategy(PlayerbotAI* botAI, std::string const& strategy, std::string const& stateName)
@@ -1183,12 +1774,13 @@ void CompleteAction(uint64 actionId, bool success, std::string const& result, st
 
 void ProcessAction(uint64 actionId, uint32 requesterGuid, std::string const& botName, uint32 botGuid,
                    std::string const& actionType, std::string const& channel, std::string const& text,
-                   std::string const& command, std::string const& strategy, std::string const& botState)
+                   std::string const& command, std::string const& strategy, std::string const& botState,
+                   std::string const& payloadJson)
 {
     if (TraceLog)
         LOG_INFO("module.playerbot_agent",
-                 "Executing action {} type={} bot={}({}) channel={} command={} strategy={} bot_state={} text={}",
-                 actionId, actionType, botName, botGuid, channel, command, strategy, botState, text);
+                 "Executing action {} type={} bot={}({}) channel={} command={} strategy={} bot_state={} payload={} text={}",
+                 actionId, actionType, botName, botGuid, channel, command, strategy, botState, payloadJson, text);
 
     Player* requester = ObjectAccessor::FindPlayer(ObjectGuid::Create<HighGuid::Player>(requesterGuid));
     if (!requester)
@@ -1197,10 +1789,20 @@ void ProcessAction(uint64 actionId, uint32 requesterGuid, std::string const& bot
         return;
     }
 
-    Player* bot = FindControlledBot(requester, botGuid, botName);
+    std::string normalizedType = ToLowerAscii(actionType);
+    if (IsTypedAction(normalizedType))
+    {
+        if (!ProcessTypedAction(actionId, requester, normalizedType, botName, payloadJson))
+            CompleteAction(actionId, false, "", "typed action failed");
+        return;
+    }
+
+    Player* bot = normalizedType == "reply" ? FindOnlinePlayerbot(botGuid, botName)
+                                            : FindControlledBot(requester, botGuid, botName);
     if (!bot)
     {
-        CompleteAction(actionId, false, "", "bot is not online or not controllable by requester");
+        CompleteAction(actionId, false, "",
+                       normalizedType == "reply" ? "bot is not online" : "bot is not online or not controllable by requester");
         return;
     }
 
@@ -1211,7 +1813,6 @@ void ProcessAction(uint64 actionId, uint32 requesterGuid, std::string const& bot
         return;
     }
 
-    std::string normalizedType = ToLowerAscii(actionType);
     if (normalizedType == "reply")
     {
         if (!SendBotReply(botAI, requester, channel.empty() ? "whisper" : channel, text))
@@ -1265,7 +1866,7 @@ void ProcessPendingActions()
 
     QueryResult result = PlayerbotsDatabase.Query(
         "SELECT `id`, `requester_guid`, `bot_guid`, `bot_name`, `action_type`, `channel`, "
-        "`text`, `command`, `strategy`, `bot_state` "
+        "`text`, `command`, `strategy`, `bot_state`, `payload_json` "
         "FROM `agent_playerbot_actions` "
         "WHERE `status` = 'pending' AND `available_at` <= NOW() "
         "ORDER BY `id` ASC LIMIT 20");
@@ -1286,13 +1887,15 @@ void ProcessPendingActions()
         std::string command = fields[7].IsNull() ? "" : fields[7].Get<std::string>();
         std::string strategy = fields[8].IsNull() ? "" : fields[8].Get<std::string>();
         std::string botState = fields[9].IsNull() ? "" : fields[9].Get<std::string>();
+        std::string payloadJson = fields[10].IsNull() ? "" : fields[10].Get<std::string>();
 
         PlayerbotsDatabase.Execute(
             "UPDATE `agent_playerbot_actions` SET `status` = 'running', `updated_at` = NOW() "
             "WHERE `id` = {} AND `status` = 'pending'",
             actionId);
 
-        ProcessAction(actionId, requesterGuid, botName, botGuid, actionType, channel, text, command, strategy, botState);
+        ProcessAction(actionId, requesterGuid, botName, botGuid, actionType, channel, text, command, strategy, botState,
+                      payloadJson);
     } while (result->NextRow());
 }
 
@@ -1319,7 +1922,9 @@ public:
             return true;
 
         std::vector<BotSnapshot> bots = GetOwnedBots(player);
-        InsertChatEvent(player, type == CHAT_MSG_YELL ? "yell" : "say", type, msg, nullptr, nullptr, bots);
+        if (!bots.empty() || LooksLikeLifecycleRequest(msg))
+            InsertChatEvent(player, type == CHAT_MSG_YELL ? "yell" : "say", type, msg, nullptr, nullptr, bots,
+                            bots.empty());
         return true;
     }
 
@@ -1332,7 +1937,7 @@ public:
             return true;
 
         std::vector<BotSnapshot> bots;
-        AddUniqueBot(bots, receiver, player);
+        AddUniqueBot(bots, receiver, player, ClassifyBotForSpeaker(player, receiver));
         InsertChatEvent(player, "whisper", type, msg, receiver, receiver ? receiver->GetGroup() : nullptr, bots);
         return true;
     }
@@ -1351,7 +1956,8 @@ public:
             ? "raid"
             : "party";
 
-        InsertChatEvent(player, channel, type, msg, nullptr, group, bots);
+        if (!bots.empty() || LooksLikeLifecycleRequest(msg))
+            InsertChatEvent(player, channel, type, msg, nullptr, group, bots, bots.empty());
         return true;
     }
 
