@@ -7,7 +7,9 @@
  */
 
 #include "Chat.h"
+#include "AiFactory.h"
 #include "CellImpl.h"
+#include "CharacterCache.h"
 #include "Config.h"
 #include "Creature.h"
 #include "DatabaseEnv.h"
@@ -15,17 +17,21 @@
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
 #include "Group.h"
+#include "Item.h"
 #include "Log.h"
 #include "Map.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
 #include "Player.h"
 #include "PlayerScript.h"
 #include "PlayerbotAI.h"
+#include "PlayerbotAIConfig.h"
 #include "PlayerbotMgr.h"
 #include "Playerbots.h"
 #include "RandomPlayerbotMgr.h"
 #include "ScriptMgr.h"
 #include "GameTime.h"
+#include "SharedDefines.h"
 #include "UnitScript.h"
 #include "World.h"
 #include "WorldScript.h"
@@ -34,6 +40,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <deque>
 #include <iomanip>
 #include <list>
@@ -49,7 +56,7 @@ bool AgentEnabled = true;
 bool SchemaReady = false;
 uint32 ActionPollIntervalMs = 500;
 uint32 ActionPollElapsedMs = 0;
-uint32 MaxReplyLength = 220;
+uint32 MaxReplyLength = 0;
 bool TraceLog = true;
 float ContextRange = 45.0f;
 uint32 MaxNearbyHostiles = 8;
@@ -57,6 +64,15 @@ bool CombatTelemetryEnabled = true;
 uint32 CombatIdleEndMs = 5000;
 uint32 CombatMinDurationMs = 3000;
 uint32 CombatTimelineLimit = 80;
+bool AnchorBotAutologin = true;
+std::string AnchorBotName = "瓦小狸";
+std::vector<std::string> AnchorBotAliases;
+uint32 AnchorBotEnsureIntervalMs = 5000;
+uint32 AnchorBotEnsureElapsedMs = 0;
+uint32 AnchorBotGuidLow = 0;
+bool AnchorBotMissingLogged = false;
+
+bool IsPlayerbot(Player* player);
 
 std::string ToLowerAscii(std::string value)
 {
@@ -70,6 +86,82 @@ bool StartsWith(std::string const& value, std::string const& prefix)
     return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
 }
 
+std::string TrimAscii(std::string value)
+{
+    auto isSpace = [](unsigned char c) { return std::isspace(c) != 0; };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), [&](unsigned char c) { return !isSpace(c); }));
+    value.erase(std::find_if(value.rbegin(), value.rend(), [&](unsigned char c) { return !isSpace(c); }).base(), value.end());
+    return value;
+}
+
+bool IsUtf8ContinuationByte(char c)
+{
+    return (static_cast<unsigned char>(c) & 0xC0) == 0x80;
+}
+
+size_t Utf8SafePrefixLength(std::string const& value, size_t maxBytes)
+{
+    size_t limit = std::min(maxBytes, value.size());
+    while (limit > 0 && limit < value.size() && IsUtf8ContinuationByte(value[limit]))
+        --limit;
+    return limit;
+}
+
+std::string SoftLimitUtf8(std::string value, uint32 maxBytes)
+{
+    if (!maxBytes || value.size() <= maxBytes)
+        return value;
+
+    std::string const suffix = "...";
+    if (maxBytes <= suffix.size())
+        return suffix.substr(0, maxBytes);
+
+    size_t limit = Utf8SafePrefixLength(value, maxBytes - suffix.size());
+
+    if (!limit)
+        return suffix;
+
+    size_t preferred = value.find_last_of(" \t\r\n,.;:!?)]}", limit - 1);
+    if (preferred != std::string::npos && preferred > limit / 2)
+        limit = preferred + 1;
+
+    limit = Utf8SafePrefixLength(value, limit);
+
+    std::string clipped = TrimAscii(value.substr(0, limit));
+    return clipped.empty() ? suffix : clipped + suffix;
+}
+
+std::vector<std::string> SplitUtf8ForChat(std::string value, size_t maxBytes)
+{
+    std::vector<std::string> chunks;
+    value = TrimAscii(value);
+    while (!value.empty())
+    {
+        if (value.size() <= maxBytes)
+        {
+            chunks.push_back(value);
+            break;
+        }
+
+        size_t limit = Utf8SafePrefixLength(value, maxBytes);
+        if (!limit)
+            break;
+
+        size_t preferred = value.find_last_of(" \t\r\n,.;:!?)]}", limit - 1);
+        if (preferred != std::string::npos && preferred > maxBytes / 2)
+            limit = preferred + 1;
+
+        limit = Utf8SafePrefixLength(value, limit);
+        std::string chunk = TrimAscii(value.substr(0, limit));
+        if (!chunk.empty())
+            chunks.push_back(chunk);
+
+        value = TrimAscii(value.substr(limit));
+    }
+
+    return chunks;
+}
+
 bool ContainsAny(std::string const& value, std::vector<std::string> const& tokens)
 {
     for (std::string const& token : tokens)
@@ -77,6 +169,105 @@ bool ContainsAny(std::string const& value, std::vector<std::string> const& token
             return true;
 
     return false;
+}
+
+std::vector<std::string> SplitConfigList(std::string value)
+{
+    std::vector<std::string> result;
+    std::string current;
+    for (char c : value)
+    {
+        if (c == ',' || c == ';')
+        {
+            current = TrimAscii(current);
+            if (!current.empty())
+                result.push_back(current);
+            current.clear();
+            continue;
+        }
+
+        current.push_back(c);
+    }
+
+    current = TrimAscii(current);
+    if (!current.empty())
+        result.push_back(current);
+
+    return result;
+}
+
+std::vector<std::string> AnchorBotTokens()
+{
+    std::vector<std::string> tokens;
+    if (!AnchorBotName.empty())
+        tokens.push_back(AnchorBotName);
+    for (std::string const& alias : AnchorBotAliases)
+        if (!alias.empty() && std::find(tokens.begin(), tokens.end(), alias) == tokens.end())
+            tokens.push_back(alias);
+    return tokens;
+}
+
+bool MessageAddressesAnchor(std::string const& msg)
+{
+    return ContainsAny(msg, AnchorBotTokens());
+}
+
+ObjectGuid ResolveAnchorBotGuid()
+{
+    if (AnchorBotGuidLow)
+        return ObjectGuid::Create<HighGuid::Player>(AnchorBotGuidLow);
+
+    if (AnchorBotName.empty())
+        return ObjectGuid::Empty;
+
+    ObjectGuid guid = sCharacterCache->GetCharacterGuidByName(AnchorBotName);
+    if (guid)
+        AnchorBotGuidLow = guid.GetCounter();
+
+    return guid;
+}
+
+bool IsAnchorBot(Player* player)
+{
+    if (!player)
+        return false;
+
+    ObjectGuid anchorGuid = ResolveAnchorBotGuid();
+    return anchorGuid && player->GetGUID() == anchorGuid;
+}
+
+Player* GetOnlineAnchorBot()
+{
+    ObjectGuid anchorGuid = ResolveAnchorBotGuid();
+    if (!anchorGuid)
+        return nullptr;
+
+    Player* bot = ObjectAccessor::FindConnectedPlayer(anchorGuid);
+    return IsPlayerbot(bot) ? bot : nullptr;
+}
+
+void EnsureAnchorBotOnline()
+{
+    if (!AnchorBotAutologin || AnchorBotName.empty())
+        return;
+
+    ObjectGuid anchorGuid = ResolveAnchorBotGuid();
+    if (!anchorGuid)
+    {
+        if (!AnchorBotMissingLogged)
+        {
+            LOG_WARN("module.playerbot_agent", "Anchor bot '{}' was not found in character cache", AnchorBotName);
+            AnchorBotMissingLogged = true;
+        }
+        return;
+    }
+
+    AnchorBotMissingLogged = false;
+    if (ObjectAccessor::FindConnectedPlayer(anchorGuid))
+        return;
+
+    LOG_INFO("module.playerbot_agent", "Ensuring anchor bot '{}' ({}) is online", AnchorBotName, anchorGuid.GetCounter());
+    sRandomPlayerbotMgr.AddPlayerBot(anchorGuid, 0);
 }
 
 std::string SqlQuote(std::string value)
@@ -276,6 +467,10 @@ struct BotSnapshot
     uint8 level = 0;
     uint32 team = 0;
     std::string role;
+    std::string specName;
+    int32 specTab = -1;
+    std::string aiState;
+    std::string strategyText;
     float healthPct = 0.0f;
     uint32 manaPct = 0;
     bool alive = false;
@@ -374,6 +569,43 @@ uint32 ManaPct(Unit* unit)
     return static_cast<uint32>(std::round(100.0f * static_cast<float>(unit->GetPower(POWER_MANA)) / static_cast<float>(maxMana)));
 }
 
+std::string StrategyListToJsonArray(std::string strategyText)
+{
+    std::string normalized = strategyText;
+    std::string prefix = "Strategies:";
+    if (normalized.size() >= prefix.size() && normalized.compare(0, prefix.size(), prefix) == 0)
+        normalized = normalized.substr(prefix.size());
+
+    std::ostringstream out;
+    out << "[";
+    bool first = true;
+    std::stringstream stream(normalized);
+    std::string item;
+    while (std::getline(stream, item, ','))
+    {
+        item = TrimAscii(item);
+        if (item.empty())
+            continue;
+
+        if (!first)
+            out << ",";
+        first = false;
+        out << "\"" << JsonEscape(item) << "\"";
+    }
+    out << "]";
+    return out.str();
+}
+
+std::string BotAiState(PlayerbotAI* botAI)
+{
+    return botAI ? botAI->HandleRemoteCommand("state") : "";
+}
+
+std::string BotStrategyText(PlayerbotAI* botAI)
+{
+    return botAI ? botAI->HandleRemoteCommand("strategy") : "";
+}
+
 uint64 NowMs()
 {
     return static_cast<uint64>(GameTime::GetGameTimeMS().count());
@@ -441,6 +673,12 @@ bool IsPlayerbot(Player* player)
     return player && GET_PLAYERBOT_AI(player) != nullptr;
 }
 
+bool IsPlayerbotAccount(ObjectGuid const& guid)
+{
+    uint32 accountId = sCharacterCache->GetCharacterAccountIdByGuid(guid);
+    return accountId && sPlayerbotAIConfig.IsInRandomAccountList(accountId);
+}
+
 bool IsOwnedBot(Player* requester, Player* bot)
 {
     if (!requester || !bot || !IsPlayerbot(bot))
@@ -462,6 +700,9 @@ std::string ClassifyBotForSpeaker(Player* speaker, Player* bot)
 {
     if (!IsPlayerbot(bot))
         return "";
+
+    if (IsAnchorBot(bot))
+        return "anchor_world";
 
     if (IsOwnedBot(speaker, bot))
         return "owned";
@@ -655,6 +896,13 @@ BotSnapshot MakeSnapshot(Player* bot, Player* reference = nullptr, std::string c
     snapshot.level = bot->GetLevel();
     snapshot.team = bot->GetTeamId();
     snapshot.role = DetectRole(bot);
+    if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot))
+    {
+        snapshot.specName = AiFactory::GetPlayerSpecName(bot);
+        snapshot.specTab = AiFactory::GetPlayerSpecTab(bot);
+        snapshot.aiState = BotAiState(botAI);
+        snapshot.strategyText = BotStrategyText(botAI);
+    }
     snapshot.healthPct = bot->GetHealthPct();
     snapshot.manaPct = ManaPct(bot);
     snapshot.alive = bot->IsAlive();
@@ -699,6 +947,12 @@ void AddUniqueBot(std::vector<BotSnapshot>& bots, Player* bot, Player* reference
 
     if (existing == bots.end())
         bots.push_back(MakeSnapshot(bot, reference, kind));
+}
+
+void AddAnchorBotIfOnline(std::vector<BotSnapshot>& bots, Player* reference)
+{
+    if (Player* anchor = GetOnlineAnchorBot())
+        AddUniqueBot(bots, anchor, reference, "anchor_world");
 }
 
 std::vector<BotSnapshot> GetGroupBots(Group* group, Player* reference)
@@ -759,17 +1013,31 @@ std::string PlayerContextToJson(Player* player, Player* reference)
     if (!player)
         return "null";
 
+    PlayerbotAI* botAI = GET_PLAYERBOT_AI(player);
+    bool isBot = botAI != nullptr;
     std::ostringstream out;
     out << "{\"guid\":" << player->GetGUID().GetCounter()
         << ",\"name\":\"" << JsonEscape(player->GetName()) << "\""
-        << ",\"is_bot\":" << (IsPlayerbot(player) ? "true" : "false")
-        << ",\"bot_kind\":\"" << JsonEscape(IsPlayerbot(player) ? ClassifyBotForSpeaker(reference, player) : "") << "\""
+        << ",\"online\":true"
+        << ",\"is_bot\":" << (isBot ? "true" : "false")
+        << ",\"bot_kind\":\"" << JsonEscape(isBot ? ClassifyBotForSpeaker(reference, player) : "") << "\""
         << ",\"class\":" << static_cast<uint32>(player->getClass())
         << ",\"race\":" << static_cast<uint32>(player->getRace())
         << ",\"level\":" << static_cast<uint32>(player->GetLevel())
         << ",\"team\":" << static_cast<uint32>(player->GetTeamId())
-        << ",\"role\":\"" << JsonEscape(IsPlayerbot(player) ? DetectRole(player) : "player") << "\""
-        << ",\"health_pct\":" << FloatString(player->GetHealthPct())
+        << ",\"role\":\"" << JsonEscape(isBot ? DetectRole(player) : "player") << "\"";
+
+    if (isBot)
+    {
+        std::string strategyText = BotStrategyText(botAI);
+        out << ",\"spec_name\":\"" << JsonEscape(AiFactory::GetPlayerSpecName(player)) << "\""
+            << ",\"spec_tab\":" << static_cast<int32>(AiFactory::GetPlayerSpecTab(player))
+            << ",\"ai_state\":\"" << JsonEscape(BotAiState(botAI)) << "\""
+            << ",\"active_strategy_text\":\"" << JsonEscape(strategyText) << "\""
+            << ",\"active_strategies\":" << StrategyListToJsonArray(strategyText);
+    }
+
+    out << ",\"health_pct\":" << FloatString(player->GetHealthPct())
         << ",\"mana_pct\":" << ManaPct(player)
         << ",\"alive\":" << (player->IsAlive() ? "true" : "false")
         << ",\"combat\":" << (player->IsInCombat() ? "true" : "false")
@@ -787,6 +1055,35 @@ std::string PlayerContextToJson(Player* player, Player* reference)
     return out.str();
 }
 
+std::string OfflineGroupMemberToJson(Group::MemberSlot const& slot)
+{
+    CharacterCacheEntry const* cache = sCharacterCache->GetCharacterCacheByGuid(slot.guid);
+    std::string name = !slot.name.empty() ? slot.name : (cache ? cache->Name : "");
+    bool isBotAccount = IsPlayerbotAccount(slot.guid);
+
+    std::ostringstream out;
+    out << "{\"guid\":" << slot.guid.GetCounter()
+        << ",\"name\":\"" << JsonEscape(name) << "\""
+        << ",\"online\":false"
+        << ",\"offline_in_group\":true"
+        << ",\"is_bot\":" << (isBotAccount ? "true" : "false")
+        << ",\"bot_kind\":\"" << (isBotAccount ? "group_offline" : "") << "\""
+        << ",\"group_subgroup\":" << static_cast<uint32>(slot.group)
+        << ",\"group_flags\":" << static_cast<uint32>(slot.flags)
+        << ",\"group_roles\":" << static_cast<uint32>(slot.roles);
+
+    if (cache)
+    {
+        out << ",\"class\":" << static_cast<uint32>(cache->Class)
+            << ",\"race\":" << static_cast<uint32>(cache->Race)
+            << ",\"level\":" << static_cast<uint32>(cache->Level)
+            << ",\"team\":" << Player::TeamIdForRace(cache->Race);
+    }
+
+    out << "}";
+    return out.str();
+}
+
 std::string GroupMembersToJson(Player* speaker, Group* group)
 {
     std::ostringstream out;
@@ -795,16 +1092,16 @@ std::string GroupMembersToJson(Player* speaker, Group* group)
 
     if (group)
     {
-        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+        for (Group::MemberSlot const& slot : group->GetMemberSlots())
         {
-            Player* member = itr->GetSource();
-            if (!member)
-                continue;
-
             if (!first)
                 out << ",";
             first = false;
-            out << PlayerContextToJson(member, speaker);
+
+            if (Player* member = ObjectAccessor::FindConnectedPlayer(slot.guid))
+                out << PlayerContextToJson(member, speaker);
+            else
+                out << OfflineGroupMemberToJson(slot);
         }
     }
     else if (speaker)
@@ -878,6 +1175,11 @@ std::string BotSnapshotsToJson(std::vector<BotSnapshot> const& bots)
             << ",\"level\":" << static_cast<uint32>(bot.level)
             << ",\"team\":" << bot.team
             << ",\"role\":\"" << JsonEscape(bot.role) << "\""
+            << ",\"spec_name\":\"" << JsonEscape(bot.specName) << "\""
+            << ",\"spec_tab\":" << bot.specTab
+            << ",\"ai_state\":\"" << JsonEscape(bot.aiState) << "\""
+            << ",\"active_strategy_text\":\"" << JsonEscape(bot.strategyText) << "\""
+            << ",\"active_strategies\":" << StrategyListToJsonArray(bot.strategyText)
             << ",\"health_pct\":" << FloatString(bot.healthPct)
             << ",\"mana_pct\":" << bot.manaPct
             << ",\"alive\":" << (bot.alive ? "true" : "false")
@@ -1371,6 +1673,20 @@ bool IsSafeCommandParam(std::string const& value)
     return true;
 }
 
+bool IsSafePlayerbotCommandLine(std::string const& value)
+{
+    if (value.empty() || value.size() > 512)
+        return false;
+
+    for (unsigned char c : value)
+    {
+        if (c < 0x20 || c == 0x7f)
+            return false;
+    }
+
+    return true;
+}
+
 bool IsAllowedBotCommand(std::string const& command)
 {
     static std::vector<std::string> const exactCommands = {
@@ -1404,11 +1720,25 @@ bool IsAllowedBotCommand(std::string const& command)
 bool IsAllowedStrategy(std::string const& strategy)
 {
     static std::vector<std::string> const allowedStrategies = {
-        "+buff", "-buff", "+loot", "-loot", "+healer dps", "-healer dps"
+        "affli", "aoe", "arcane", "arms", "baoe", "barmor", "bear", "bcast", "bdps", "bhealth",
+        "blood", "bm", "bmana", "boost", "bspeed", "bstats", "bthreat", "buff", "caster", "caster aoe",
+        "caster debuff", "cat", "cat aoe", "cc", "cleansing", "cure", "demo", "destro", "dps", "dps debuff",
+        "earthbind", "ele", "enh", "felguard", "felhunter", "fire", "firestarter", "flametongue", "frost",
+        "frost aoe", "frostfire", "fury", "heal", "healer dps", "healing stream", "holy dps", "holy heal",
+        "imp", "loot", "magma", "mana spring", "melee", "meta melee", "mm", "nc", "offheal", "pet", "pull",
+        "resto", "rfire", "rfrost", "rnature", "rshadow", "shadow", "shadow aoe", "shadow debuff", "searing",
+        "ss healer", "ss master", "ss self", "ss tank", "stealth", "stealthed", "stoneskin",
+        "strength of earth", "succubus", "surv", "tank", "trap weave", "tremor", "unholy",
+        "unholy aoe", "voidwalker", "windfury", "wrath", "wrath of air"
     };
 
     std::string normalized = ToLowerAscii(strategy);
-    return std::find(allowedStrategies.begin(), allowedStrategies.end(), normalized) != allowedStrategies.end();
+    normalized = TrimAscii(normalized);
+    if (normalized.empty() || (normalized[0] != '+' && normalized[0] != '-'))
+        return false;
+
+    std::string base = TrimAscii(normalized.substr(1));
+    return std::find(allowedStrategies.begin(), allowedStrategies.end(), base) != allowedStrategies.end();
 }
 
 bool IsAllowedBotClass(std::string const& className)
@@ -1465,6 +1795,190 @@ std::string PayloadFirstValue(std::string const& payloadJson, std::vector<std::s
     return "";
 }
 
+uint32 PayloadUIntValue(std::string const& payloadJson, std::string const& key, uint32 defaultValue)
+{
+    std::string value = PayloadValue(payloadJson, key);
+    if (value.empty())
+        return defaultValue;
+
+    char* end = nullptr;
+    unsigned long parsed = std::strtoul(value.c_str(), &end, 10);
+    if (end == value.c_str())
+        return defaultValue;
+
+    return static_cast<uint32>(parsed);
+}
+
+struct ConsumableTier
+{
+    uint8 requiredLevel;
+    uint32 itemId;
+};
+
+uint32 SelectConsumableItem(std::vector<ConsumableTier> const& tiers, uint8 maxLevel)
+{
+    uint32 selected = 0;
+    for (ConsumableTier const& tier : tiers)
+    {
+        if (tier.requiredLevel <= maxLevel)
+            selected = tier.itemId;
+    }
+
+    return selected;
+}
+
+std::string ItemName(uint32 itemId)
+{
+    ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId);
+    if (!proto)
+        return std::to_string(itemId);
+
+    return proto->Name1;
+}
+
+bool StoreConsumable(Player* receiver, uint32 itemId, uint32 count, std::string& error)
+{
+    if (!receiver || !itemId || !count)
+        return true;
+
+    if (!sObjectMgr->GetItemTemplate(itemId))
+    {
+        error = "consumable item template not found";
+        return false;
+    }
+
+    ItemPosCountVec dest;
+    InventoryResult msg = receiver->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, itemId, count);
+    if (msg != EQUIP_ERR_OK)
+    {
+        error = "target player cannot store consumables; bags may be full";
+        return false;
+    }
+
+    receiver->StoreNewItem(dest, itemId, true, Item::GenerateItemRandomPropertyId(itemId));
+    SQLTransaction<CharacterDatabaseConnection> trans = CharacterDatabase.BeginTransaction();
+    receiver->SaveInventoryAndGoldToDB(trans);
+    CharacterDatabase.CommitTransaction(trans);
+    return true;
+}
+
+void CompleteAction(uint64 actionId, bool success, std::string const& result, std::string const& error);
+
+bool ProcessProvideConsumables(uint64 actionId, Player* requester, std::string const& botName,
+                               std::string const& payloadJson)
+{
+    if (!requester)
+    {
+        CompleteAction(actionId, false, "", "requester is not online");
+        return true;
+    }
+
+    Player* bot = FindControlledBot(requester, 0, botName);
+    if (!bot)
+    {
+        CompleteAction(actionId, false, "", "mage bot is not online or not controllable by requester");
+        return true;
+    }
+
+    if (bot->getClass() != CLASS_MAGE)
+    {
+        CompleteAction(actionId, false, "", "target bot is not a mage");
+        return true;
+    }
+
+    if (!bot->IsAlive())
+    {
+        CompleteAction(actionId, false, "", "mage bot is dead");
+        return true;
+    }
+
+    if (bot->IsInCombat())
+    {
+        CompleteAction(actionId, false, "", "mage bot is in combat");
+        return true;
+    }
+
+    std::string targetName = PayloadFirstValue(payloadJson, {"target_player", "player", "target"});
+    Player* receiver = nullptr;
+    if (targetName.empty() || ToLowerAscii(targetName) == ToLowerAscii(requester->GetName()))
+        receiver = requester;
+    else
+        receiver = ObjectAccessor::FindPlayerByName(targetName, false);
+
+    if (!receiver)
+    {
+        CompleteAction(actionId, false, "", "target player is not online");
+        return true;
+    }
+
+    if (receiver != requester && (!requester->GetGroup() || requester->GetGroup() != receiver->GetGroup()))
+    {
+        CompleteAction(actionId, false, "", "target player is not in requester's group");
+        return true;
+    }
+
+    if (!bot->IsInMap(receiver) || bot->GetDistance(receiver) > ContextRange)
+    {
+        CompleteAction(actionId, false, "", "target player is not near the mage bot");
+        return true;
+    }
+
+    uint32 waterStacks = std::min<uint32>(PayloadUIntValue(payloadJson, "water_stacks", 1), 5);
+    uint32 foodStacks = std::min<uint32>(PayloadUIntValue(payloadJson, "food_stacks", 1), 5);
+    if (!waterStacks && !foodStacks)
+    {
+        CompleteAction(actionId, false, "", "empty consumable request");
+        return true;
+    }
+
+    static std::vector<ConsumableTier> const waterTiers = {
+        {1, 5350}, {5, 2288}, {15, 2136}, {25, 3772}, {35, 8077},
+        {45, 8078}, {55, 8079}, {60, 30703}, {65, 22018}
+    };
+    static std::vector<ConsumableTier> const foodTiers = {
+        {1, 5349}, {5, 1113}, {15, 1114}, {25, 1487}, {35, 8075},
+        {45, 8076}, {55, 22895}, {65, 22019}, {74, 43518}, {80, 43523}
+    };
+
+    uint8 maxConsumableLevel = std::min<uint8>(bot->GetLevel(), receiver->GetLevel());
+    uint32 waterItem = SelectConsumableItem(waterTiers, maxConsumableLevel);
+    uint32 foodItem = SelectConsumableItem(foodTiers, maxConsumableLevel);
+
+    std::string error;
+    uint32 waterCount = waterStacks * 20;
+    uint32 foodCount = foodStacks * 20;
+
+    if (waterCount && !StoreConsumable(receiver, waterItem, waterCount, error))
+    {
+        CompleteAction(actionId, false, "", error);
+        return true;
+    }
+
+    if (foodCount && !StoreConsumable(receiver, foodItem, foodCount, error))
+    {
+        CompleteAction(actionId, false, "", error);
+        return true;
+    }
+
+    std::ostringstream result;
+    result << bot->GetName() << " provided ";
+    bool hasPrevious = false;
+    if (waterCount)
+    {
+        result << waterCount << " x " << ItemName(waterItem);
+        hasPrevious = true;
+    }
+    if (foodCount)
+    {
+        if (hasPrevious)
+            result << ", ";
+        result << foodCount << " x " << ItemName(foodItem);
+    }
+    result << " to " << receiver->GetName();
+    CompleteAction(actionId, true, result.str(), "");
+    return true;
+}
+
 bool RunPlayerbotMgrCommand(Player* requester, std::string const& args, std::string& result, std::string& error)
 {
     result.clear();
@@ -1494,6 +2008,7 @@ bool RunPlayerbotMgrCommand(Player* requester, std::string const& args, std::str
     if (normalized.find("error") != std::string::npos || normalized.find("failed") != std::string::npos ||
         normalized.find("not found") != std::string::npos || normalized.find("not allowed") != std::string::npos ||
         normalized.find("permission") != std::string::npos || normalized.find("unknown command") != std::string::npos ||
+        normalized.find("unknown gender") != std::string::npos || normalized.find("invalid") != std::string::npos ||
         normalized.find("disabled") != std::string::npos || normalized.find("too low") != std::string::npos ||
         normalized.find("can not") != std::string::npos || normalized.find("cannot") != std::string::npos ||
         normalized.find("already in progress") != std::string::npos)
@@ -1509,7 +2024,8 @@ bool IsTypedAction(std::string const& normalizedType)
 {
     static std::vector<std::string> const typedActions = {
         "summon_bot", "init_bot", "dismiss_bot", "list_bots", "lookup_bot_pool",
-        "refresh_bot", "level_bot", "init_instance_quests", "invite_player"
+        "refresh_bot", "level_bot", "init_instance_quests", "invite_player", "playerbot_command",
+        "provide_consumables"
     };
 
     return std::find(typedActions.begin(), typedActions.end(), normalizedType) != typedActions.end();
@@ -1522,6 +2038,39 @@ bool ProcessTypedAction(uint64 actionId, Player* requester, std::string const& n
 {
     std::string result;
     std::string error;
+
+    if (normalizedType == "provide_consumables")
+        return ProcessProvideConsumables(actionId, requester, botName, payloadJson);
+
+    if (normalizedType == "playerbot_command")
+    {
+        std::string commandLine = TrimAscii(PayloadFirstValue(payloadJson, {"command_line", "command", "args"}));
+        std::string lowered = ToLowerAscii(commandLine);
+        if (StartsWith(lowered, ".playerbots"))
+        {
+            commandLine = TrimAscii(commandLine.substr(std::string(".playerbots").size()));
+            lowered = ToLowerAscii(commandLine);
+        }
+        if (StartsWith(lowered, ".bot"))
+        {
+            commandLine = TrimAscii(commandLine.substr(std::string(".bot").size()));
+            lowered = ToLowerAscii(commandLine);
+        }
+        if (lowered == "bot" || StartsWith(lowered, "bot "))
+            commandLine = TrimAscii(commandLine.size() > 3 ? commandLine.substr(3) : "");
+
+        if (!IsSafePlayerbotCommandLine(commandLine))
+        {
+            CompleteAction(actionId, false, "", "playerbot command line is invalid");
+            return true;
+        }
+
+        if (!RunPlayerbotMgrCommand(requester, commandLine, result, error))
+            CompleteAction(actionId, false, "", error);
+        else
+            CompleteAction(actionId, true, result, "");
+        return true;
+    }
 
     if (normalizedType == "summon_bot")
     {
@@ -1742,22 +2291,44 @@ bool ApplyStrategy(PlayerbotAI* botAI, std::string const& strategy, std::string 
     return false;
 }
 
+bool SendBotReplyChunk(PlayerbotAI* botAI, Player* requester, std::string const& normalized, std::string const& text)
+{
+    if (normalized == "party" || normalized == "raid")
+    {
+        Player* bot = botAI->GetBot();
+        if (IsAnchorBot(bot) && (!requester->GetGroup() || !bot->GetGroup() || bot->GetGroup() != requester->GetGroup()))
+            return botAI->Whisper(text, requester->GetName());
+        return botAI->SayToParty(text) || botAI->TellMaster(text) || botAI->Whisper(text, requester->GetName());
+    }
+
+    if (normalized == "say")
+    {
+        Player* bot = botAI->GetBot();
+        if (IsAnchorBot(bot) && (!bot->IsInMap(requester) || bot->GetDistance(requester) > ContextRange))
+            return botAI->Whisper(text, requester->GetName());
+        return botAI->Say(text);
+    }
+
+    return botAI->Whisper(text, requester->GetName());
+}
+
 bool SendBotReply(PlayerbotAI* botAI, Player* requester, std::string const& channel, std::string text)
 {
     if (!botAI || !requester || text.empty())
         return false;
 
-    if (text.size() > MaxReplyLength)
-        text = text.substr(0, MaxReplyLength);
+    text = SoftLimitUtf8(text, MaxReplyLength);
 
     std::string normalized = ToLowerAscii(channel);
-    if (normalized == "party")
-        return botAI->SayToParty(text) || botAI->TellMaster(text);
+    std::vector<std::string> chunks = SplitUtf8ForChat(text, 220);
+    if (chunks.empty())
+        return false;
 
-    if (normalized == "say")
-        return botAI->Say(text);
+    for (std::string const& chunk : chunks)
+        if (!SendBotReplyChunk(botAI, requester, normalized, chunk))
+            return false;
 
-    return botAI->Whisper(text, requester->GetName());
+    return true;
 }
 
 void CompleteAction(uint64 actionId, bool success, std::string const& result, std::string const& error)
@@ -1782,7 +2353,7 @@ void ProcessAction(uint64 actionId, uint32 requesterGuid, std::string const& bot
                  "Executing action {} type={} bot={}({}) channel={} command={} strategy={} bot_state={} payload={} text={}",
                  actionId, actionType, botName, botGuid, channel, command, strategy, botState, payloadJson, text);
 
-    Player* requester = ObjectAccessor::FindPlayer(ObjectGuid::Create<HighGuid::Player>(requesterGuid));
+    Player* requester = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(requesterGuid));
     if (!requester)
     {
         CompleteAction(actionId, false, "", "requester is not online");
@@ -1922,7 +2493,11 @@ public:
             return true;
 
         std::vector<BotSnapshot> bots = GetOwnedBots(player);
-        if (!bots.empty() || LooksLikeLifecycleRequest(msg))
+        bool addressedAnchor = MessageAddressesAnchor(msg);
+        if (addressedAnchor)
+            AddAnchorBotIfOnline(bots, player);
+
+        if (!bots.empty() || LooksLikeLifecycleRequest(msg) || addressedAnchor)
             InsertChatEvent(player, type == CHAT_MSG_YELL ? "yell" : "say", type, msg, nullptr, nullptr, bots,
                             bots.empty());
         return true;
@@ -1938,7 +2513,8 @@ public:
 
         std::vector<BotSnapshot> bots;
         AddUniqueBot(bots, receiver, player, ClassifyBotForSpeaker(player, receiver));
-        InsertChatEvent(player, "whisper", type, msg, receiver, receiver ? receiver->GetGroup() : nullptr, bots);
+        Group* contextGroup = player->GetGroup() ? player->GetGroup() : (receiver ? receiver->GetGroup() : nullptr);
+        InsertChatEvent(player, "whisper", type, msg, receiver, contextGroup, bots);
         return true;
     }
 
@@ -2022,7 +2598,7 @@ public:
     {
         AgentEnabled = sConfigMgr->GetOption<bool>("AgentPlayerbot.Enabled", true);
         ActionPollIntervalMs = sConfigMgr->GetOption<uint32>("AgentPlayerbot.ActionPollIntervalMs", 500);
-        MaxReplyLength = sConfigMgr->GetOption<uint32>("AgentPlayerbot.MaxReplyLength", 220);
+        MaxReplyLength = sConfigMgr->GetOption<uint32>("AgentPlayerbot.MaxReplyLength", 0);
         TraceLog = sConfigMgr->GetOption<bool>("AgentPlayerbot.TraceLog", true);
         ContextRange = sConfigMgr->GetOption<float>("AgentPlayerbot.ContextRange", 45.0f);
         MaxNearbyHostiles = sConfigMgr->GetOption<uint32>("AgentPlayerbot.MaxNearbyHostiles", 8);
@@ -2030,6 +2606,14 @@ public:
         CombatIdleEndMs = sConfigMgr->GetOption<uint32>("AgentPlayerbot.CombatIdleEndMs", 5000);
         CombatMinDurationMs = sConfigMgr->GetOption<uint32>("AgentPlayerbot.CombatMinDurationMs", 3000);
         CombatTimelineLimit = sConfigMgr->GetOption<uint32>("AgentPlayerbot.CombatTimelineLimit", 80);
+        AnchorBotAutologin = sConfigMgr->GetOption<bool>("AgentPlayerbot.AnchorBotAutologin", true);
+        AnchorBotName = sConfigMgr->GetOption<std::string>("AgentPlayerbot.AnchorBotName", "瓦小狸");
+        AnchorBotAliases = SplitConfigList(sConfigMgr->GetOption<std::string>("AgentPlayerbot.AnchorBotAliases", "小狸"));
+        AnchorBotEnsureIntervalMs = std::max<uint32>(
+            1000, sConfigMgr->GetOption<uint32>("AgentPlayerbot.AnchorBotEnsureIntervalMs", 5000));
+        AnchorBotEnsureElapsedMs = AnchorBotEnsureIntervalMs;
+        AnchorBotGuidLow = 0;
+        AnchorBotMissingLogged = false;
 
         if (!AgentEnabled)
         {
@@ -2039,15 +2623,25 @@ public:
 
         EnsureSchema();
         LOG_INFO("module.playerbot_agent",
-                 "Playerbot Agent bridge enabled; action poll interval {} ms, trace={}, context range={}, max hostiles={}, combat telemetry={}",
+                 "Playerbot Agent bridge enabled; action poll interval {} ms, trace={}, context range={}, max hostiles={}, combat telemetry={}, max reply bytes={}, anchor={} autologin={}",
                  ActionPollIntervalMs, TraceLog ? "on" : "off", ContextRange, MaxNearbyHostiles,
-                 CombatTelemetryEnabled ? "on" : "off");
+                 CombatTelemetryEnabled ? "on" : "off", MaxReplyLength, AnchorBotName, AnchorBotAutologin ? "on" : "off");
     }
 
     void OnUpdate(uint32 diff) override
     {
         if (!AgentEnabled || !SchemaReady)
             return;
+
+        if (AnchorBotAutologin)
+        {
+            AnchorBotEnsureElapsedMs += diff;
+            if (AnchorBotEnsureElapsedMs >= AnchorBotEnsureIntervalMs)
+            {
+                AnchorBotEnsureElapsedMs = 0;
+                EnsureAnchorBotOnline();
+            }
+        }
 
         ActionPollElapsedMs += diff;
         if (ActionPollElapsedMs < ActionPollIntervalMs)

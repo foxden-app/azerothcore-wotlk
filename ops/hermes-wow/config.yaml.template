@@ -1,0 +1,81 @@
+custom_providers:
+  - name: deepseek-wow
+    base_url: https://api.deepseek.com/v1
+    key_env: DEEPSEEK_API_KEY
+    api_mode: chat_completions
+
+model:
+  provider: custom:deepseek-wow
+  default: deepseek-v4-flash
+  api_mode: chat_completions
+  max_tokens: 2048
+
+mcp_servers:
+  wow_playerbot:
+    url: "http://192.168.1.15:18765/mcp"
+    headers:
+      Authorization: "Bearer __PLAYERBOT_MCP_BEARER_TOKEN__"
+    timeout: 120
+    connect_timeout: 10
+    supports_parallel_tool_calls: false
+    tools:
+      include:
+        - wow_get_recent_events
+        - wow_get_party_state
+        - wow_get_location
+        - wow_get_action_results
+        - wow_get_last_command_diagnostic
+        - wow_get_session_goals
+        - wow_set_session_goal
+        - wow_get_player_quests
+        - wow_search_quests
+        - wow_get_quest_details
+        - wow_get_quest_guide
+        - wow_resolve_place
+        - wow_plan_route
+        - wow_get_group_travel_status
+        - wow_start_bot_travel
+        - wow_get_recent_combat_summaries
+        - wow_get_combat_summary
+        - wow_get_playerbot_command_catalog
+        - wow_get_bot_profile
+        - wow_get_supported_bot_strategies
+        - wow_reply
+        - wow_summon_bot
+        - wow_init_bot
+        - wow_dismiss_bot
+        - wow_refresh_bot
+        - wow_level_bot
+        - wow_init_instance_quests
+        - wow_list_bots
+        - wow_lookup_bot_pool
+        - wow_run_playerbot_command
+        - wow_invite_player
+        - wow_bot_follow
+        - wow_bot_stay
+        - wow_bot_retreat
+        - wow_bot_attack_target
+        - wow_bot_pull
+        - wow_bot_ready
+        - wow_bot_burst
+        - wow_focus_heal
+        - wow_bot_provide_consumables
+        - wow_get_inventory_for_trade
+        - wow_search_auction
+        - wow_estimate_item_value
+        - wow_plan_auction_sales
+        - wow_set_bot_strategy
+        - wow_set_bot_role
+        - wow_set_loot_mode
+        - wow_set_buff
+        - wow_set_healer_dps
+      resources: false
+      prompts: false
+
+skills:
+  external_dirs: []
+
+logging:
+  level: DEBUG
+  max_size_mb: 20
+  backup_count: 5

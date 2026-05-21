@@ -76,6 +76,16 @@ BindIP = "0.0.0.0"
 EnableProxyProtocol = 0
 
 #
+#    RealmList.RealmIDAliases
+#        Description: Comma-separated public-to-effective realm id aliases.
+#                     Use this to expose multiple realmlist entries that route
+#                     to the same worldserver realm.
+#        Example:     "2:1" - (show realm id 2, authenticate as realm id 1)
+#        Default:     ""    - (Disabled)
+
+RealmList.RealmIDAliases = ""
+
+#
 #    PidFile
 #        Description: Auth server PID file.
 #        Example:     "./authserver.pid"  - (Enabled)

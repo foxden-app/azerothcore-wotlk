@@ -1,0 +1,109 @@
+digraph AgentPlayerbotArchitecture {
+  graph [
+    rankdir=LR,
+    bgcolor="white",
+    pad=0.35,
+    nodesep=0.7,
+    ranksep=0.9,
+    fontname="Noto Sans CJK SC",
+    fontsize=18,
+    labelloc=t,
+    label="WoW PlayerBot Agent 当前架构（2026-05-20）"
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Noto Sans CJK SC",
+    fontsize=12,
+    color="#64748B",
+    penwidth=1.2,
+    fillcolor="#F8FAFC",
+    margin="0.12,0.08"
+  ];
+
+  edge [
+    fontname="Noto Sans CJK SC",
+    fontsize=10,
+    color="#475569",
+    arrowsize=0.8,
+    penwidth=1.1
+  ];
+
+  subgraph cluster_player {
+    label="游戏内玩家视角";
+    color="#CBD5E1";
+    style="rounded";
+
+    player [label="真实玩家\n/p /s /y /w"];
+    anchor [label="固定入口 bot：瓦小狸\n默认在线；/s /y 点名才触发\nparty 失败时 whisper 回退", fillcolor="#ECFEFF"];
+    groupbots [label="可控 AddClass 小队 bot\n坦克 / 治疗 / DPS\n职业本能自动战斗", fillcolor="#ECFEFF"];
+    randombots [label="随机世界 bot\n只允许闲聊回复\n不允许 Agent 控制动作", fillcolor="#F1F5F9"];
+  }
+
+  subgraph cluster_t490 {
+    label="T490：AzerothCore + 本地基础设施";
+    color="#CBD5E1";
+    style="rounded";
+
+    auth [label="authserver\n0.0.0.0:3724"];
+    world [label="worldserver\n0.0.0.0:8085\nSOAP 7879", fillcolor="#EFF6FF"];
+    modpb [label="mod-playerbots\n高频小脑/本能\n治疗、坦克、DPS、跟随、拾取"];
+    bridge [label="mod-playerbot-agent\nC++ 薄桥\n采集上下文 / 执行动作\n回复分片，不硬截断", fillcolor="#EFF6FF"];
+    mcp [label="wow_playerbot MCP 服务\nsystemd 平级服务\n0.0.0.0:18765", fillcolor="#F0FDF4"];
+    relay [label="Hermes relay\n读取事件，推送 RT Hermes\n写中文 JSONL 日志", fillcolor="#F0FDF4"];
+    legacy [label="旧 Python sidecar\n可回滚路径\n默认不做 LLM 决策", fillcolor="#F8FAFC", style="rounded,dashed,filled"];
+  }
+
+  subgraph cluster_db {
+    label="MySQL 数据真相";
+    color="#CBD5E1";
+    style="rounded";
+
+    dbworld [label="acore_playerbot_world\n世界/任务/物品/拍卖数据"];
+    dbchars [label="acore_playerbot_characters\n玩家、bot、背包、任务进度"];
+    dbevents [label="acore_playerbots.agent_playerbot_events\n聊天事件 + 位置/队伍/目标上下文", fillcolor="#FFF7ED"];
+    dbactions [label="acore_playerbots.agent_playerbot_actions\n白名单动作队列\nreply / command / typed actions", fillcolor="#FFF7ED"];
+    dbcombat [label="agent_playerbot_combat_summaries\n战斗摘要 facts_json\n输出/治疗/承伤/死亡", fillcolor="#FFF7ED"];
+  }
+
+  subgraph cluster_rt {
+    label="RT：Hermes Agent 容器";
+    color="#CBD5E1";
+    style="rounded";
+
+    hermesapi [label="Hermes API\n容器 hermes-wow\n0.0.0.0:8642", fillcolor="#FEFCE8"];
+    hermesagent [label="Hermes Agent\n长期会话、规划、工具调用\nDeepSeek provider", fillcolor="#FEFCE8"];
+    skill [label="wow-playerbot-control Skill\n中文规则、工具边界\n短但完整的回复风格", fillcolor="#FEFCE8"];
+    memory [label="Hermes sessions / memory\n队伍目标、私聊上下文\n多轮对话", fillcolor="#FEFCE8"];
+  }
+
+  player -> world [label="玩家聊天/操作"];
+  world -> bridge [label="PlayerScript / WorldScript hooks"];
+  bridge -> dbevents [label="写入事件和当前上下文"];
+  bridge -> dbcombat [label="战斗脱离后写摘要"];
+
+  relay -> dbevents [label="轮询未处理事件"];
+  relay -> hermesapi [label="POST /v1/responses"];
+  hermesapi -> hermesagent [label="会话 turn"];
+  hermesagent -> skill [label="遵守 Skill"];
+  hermesagent -> memory [label="读写会话记忆"];
+  hermesagent -> mcp [label="MCP tools\nbearer token"];
+
+  mcp -> dbworld [label="任务/物品/拍卖只读查询"];
+  mcp -> dbchars [label="玩家本人任务进度/背包"];
+  mcp -> dbevents [label="读取最近事件/上下文"];
+  mcp -> dbcombat [label="读取最近战斗摘要"];
+  mcp -> dbactions [label="入队 typed action / wow_reply"];
+
+  bridge -> dbactions [label="500ms 轮询 pending"];
+  bridge -> modpb [label="调用 PlayerbotMgr / botAI\n强类型白名单动作"];
+  modpb -> groupbots [label="低频指令后\n高频本能接管"];
+  bridge -> anchor [label="reply：say/party/whisper\n长回复拆多条"];
+  bridge -> randombots [label="reply-only"];
+  anchor -> player [label="可见回复"];
+  groupbots -> player [label="队伍协作"];
+
+  auth -> world [label="登录服共享"];
+  legacy -> dbactions [label="旧模式也只写动作队列", style=dashed];
+}

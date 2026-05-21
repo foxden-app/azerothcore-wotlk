@@ -121,3 +121,8 @@ local.properties
 # ==================
 .cache
 compile_commands.json
+.antigravitycli/
+.telegram-inbox/
+/env/.antigravitycli/
+!/ops/patches/
+!/ops/patches/*.patch

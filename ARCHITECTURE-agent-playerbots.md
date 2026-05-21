@@ -1,6 +1,6 @@
 # Agent PlayerBot 架构真相源
 
-最后核对：2026-05-08
+最后核对：2026-05-21
 
 本文件是当前 `playerbot-agent` 分支的架构真相源。部署拓扑、数据库归属、端口、模块边界、Agent 分层和关键设计变化，都以这里为准。
 
@@ -27,7 +27,21 @@ tools/playerbot-agent/agent_bridge.py
   - 中文规则优先
   - 可选 OpenAI-compatible LLM
   - 输出 Playerbots 小脑可执行的安全动作
+
+tools/playerbot-mcp/
+  - Hermes Harness 接入层
+  - MCP 工具服务暴露安全的 WoW PlayerBot tools
+  - Hermes relay 把游戏事件推送到 RT 上的 Hermes Agent conversation
+  - 仍只通过 agent_playerbot_actions 写入白名单动作
 ```
+
+2026-05-18 已把 Hermes 模式补到可日常指挥的基础面：MCP 既有召唤、初始化、下线、刷新、升级、任务、邀请等生命周期 typed tools，也暴露了跟随、停留、撤退、攻击、拉怪、ready、重点治疗、拾取、buff、治疗输出策略等低频 command/strategy typed tools。Harness/Hermes 不直接拼聊天快捷命令，优先调用这些 typed tools；未包装的 `.playerbots bot` 子命令才走 `wow_run_playerbot_command` 兜底。
+
+2026-05-20 当前默认运行路径是 Hermes：T490 上的 worldserver、MCP 服务和 Hermes relay 由 systemd 管理；RT 上的 `hermes-wow` 容器承接长期会话、规划、记忆和 MCP 工具调用。固定入口 bot `瓦小狸` 默认在线，`/s`、`/y` 需要点名才转给 Hermes；`/p`、`/raid` 仍走队伍上下文；回复要求短但完整，传输层会拆分长消息，不再硬截断半句话。
+
+2026-05-21 增加事件边界保护：relay 发送给 Hermes 的每轮输入都带 `current_event_id`，所有会回复或执行动作的 MCP 调用必须使用这个事件 ID。MCP 入队层默认拒绝已处理旧事件上的动作，防止 Agent 记忆污染后拿旧 `event_id` 重复召唤、下线或回复。worldserver 执行动作时使用 connected player 查找请求者，降低玩家明明在线但动作返回 `requester is not online` 的概率。
+
+同日补齐离线队伍成员上下文：私聊瓦小狸时也带发言玩家自己的队伍，`group_members` 会输出队伍名单里的离线 slot；离线 bot 标记为 `group_offline`。relay 对“队友上线/小队回来/灰名叫回”有确定性 fast-path，直接执行 `add <BotName>`，不再让 Hermes 从空队伍快照里猜。
 
 核心分层：
 
@@ -51,7 +65,20 @@ AzerothCore 世界
   - 地图、角色、战斗、寻路、数据库、网络会话
 ```
 
+Hermes 模式下，`playerbot-agent` 侧车不再直接做 LLM 决策；T490 上的 `playerbot-hermes-relay` 将 `agent_playerbot_events` 推给 RT 上的 Hermes，Hermes 再通过 T490 的 WoW MCP 工具写入 `agent_playerbot_actions`。旧侧车保留为可回滚实现。
+
 大模型不应该每秒决定“按哪个技能”。这类高频行为属于 Playerbots 本能。大模型应该决定“现在需要一个治疗进队”“这句话是在叫我组人”“这波打完先休整”“这个副本需要坦克+治疗+3DPS”。
+
+## 当前架构图
+
+![WoW PlayerBot Agent 当前架构](doc/agent-playerbot-architecture.svg)
+
+图源文件：`doc/agent-playerbot-architecture.dot`。渲染产物同时保留 `doc/agent-playerbot-architecture.svg` 和 `doc/agent-playerbot-architecture.png`，需要更新时执行：
+
+```bash
+dot -Tsvg doc/agent-playerbot-architecture.dot -o doc/agent-playerbot-architecture.svg
+dot -Tpng doc/agent-playerbot-architecture.dot -o doc/agent-playerbot-architecture.png
+```
 
 ## 当前部署
 
@@ -79,8 +106,8 @@ world 库:     acore_world
 ```text
 源码/构建目录: /home/wuya/git/azerothcore-wotlk-git
 运行目录:      /home/wuya/git/azerothcore-wotlk-git/env/dist
-tmux 会话:     playerbot-world
-worldserver:   0.0.0.0:8086
+进程管理:      systemd
+worldserver:   0.0.0.0:8085
 SOAP:          0.0.0.0:7879
 auth 库:       acore_auth
 world 库:      acore_playerbot_world
@@ -90,17 +117,19 @@ Playerbots库:  acore_playerbots
 核心上游:      playerbots-core/Playerbot
 模块:          modules/mod-playerbots
 Agent桥模块:   modules/mod-playerbot-agent
-Agent侧车:     tools/playerbot-agent/agent_bridge.py
+旧Agent侧车:   tools/playerbot-agent/agent_bridge.py
+Hermes MCP:    tools/playerbot-mcp/server.py，0.0.0.0:18765
+Hermes relay:  tools/playerbot-mcp/hermes_relay.py
+RT Hermes API: http://192.168.1.179:8642/v1/responses
 ```
 
 Realm：
 
 ```text
-id=1  AzerothCore       38.207.189.99:8085
-id=2  Agent PlayerBot   38.207.189.99:8086
+id=1  Agent PlayerBot   38.207.189.99:8085
 ```
 
-当前 `8086` 是 PlayerBot Agent 服。它复用 `acore_auth`，但使用独立 world/characters/playerbots 数据库，避免污染生产数据。
+当前 `8085` 是 PlayerBot Agent 服。它复用 `acore_auth`，但使用独立 world/characters/playerbots 数据库，避免污染生产数据。
 
 ## 当前运行策略
 
@@ -122,8 +151,8 @@ AiPlayerbot.PlayerHotspotCooldown = 600
 AiPlayerbot.PlayerHotspotScanInterval = 30
 AiPlayerbot.RandomBotJoinLfg = 1
 AiPlayerbot.RandomBotJoinBG = 1
-AiPlayerbot.RandomBotTalk = 1
-AiPlayerbot.RandomBotSuggestDungeons = 1
+AiPlayerbot.RandomBotTalk = 0
+AiPlayerbot.RandomBotSuggestDungeons = 0
 AiPlayerbot.AddClassCommand = 1
 AiPlayerbot.AddClassAccountPoolSize = 50
 AiPlayerbot.ApplyInstanceStrategies = 1
@@ -131,7 +160,10 @@ AiPlayerbot.CombatStrategies = "-healer dps"
 AiPlayerbot.CommandServerPort = 0
 AgentPlayerbot.Enabled = 1
 AgentPlayerbot.ActionPollIntervalMs = 500
-AgentPlayerbot.MaxReplyLength = 220
+AgentPlayerbot.MaxReplyLength = 0
+AgentPlayerbot.AnchorBotAutologin = 1
+AgentPlayerbot.AnchorBotName = "瓦小狸"
+AgentPlayerbot.AnchorBotAliases = "小狸"
 ```
 
 服务器性能调优：
@@ -177,12 +209,12 @@ AddClass 账号池:   50
 | --- | --- | --- |
 | L1 | 当前已经能通过 `.playerbots` 命令桥或 SOAP 间接调用 | 可以先包装成 Intent Adapter |
 | L2 | bot 上线后自动生效的策略/行为树本能 | 上层通过职业、初始化、队伍目标和策略调参间接控制 |
-| L3 | 底层已有聊天快捷命令、Action 或 C++ 能力，但还没有安全强类型 API | 需要 Adapter 包装，不能让 LLM 直接拼命令 |
+| L3 | 底层已有聊天快捷命令、Action 或 C++ 能力，但还没有安全强类型 API | 通过 MCP 通用命令入口执行，由 worldserver 按玩家权限校验并返回结果 |
 | L4 | 模块支持但当前配置关闭，或只适合 GM/维护 | 默认不暴露给 LLM |
 
 ### L1：当前可直接包装的命令桥本能
 
-这些能力已经能从游戏内 `.playerbots bot ...` 使用，也可以由服务端通过 SOAP 代执行。第一版 Agent Adapter 应优先只包装这些低风险能力。
+这些能力已经能从游戏内 `.playerbots bot ...` 使用，也可以由 MCP typed tools 或通用 `wow_run_playerbot_command` 代执行。Agent 应优先使用 typed tools；遇到未包装能力时再使用通用命令入口。
 
 | Agent intent | 当前 Playerbots 小脑语言 | 说明 |
 | --- | --- | --- |
@@ -199,8 +231,8 @@ AddClass 账号池:   50
 | `refresh_bot_raid_lock` | `.playerbots bot refresh=raid <name>` | 解除副本绑定相关状态。源码里标注该能力还不完美，默认不作为常规玩家能力。 |
 | `level_bot` | `.playerbots bot levelup <name>`，别名 `level` | 让 AddClass bot 跟随等级初始化。 |
 | `init_instance_quests` | `.playerbots bot quests <name>` | 初始化副本任务。 |
-| `reload_playerbot_config` | `.playerbots bot reload` | 重新读取 Playerbots 配置。GM/运维能力，不给普通 LLM 调用。 |
-| `toggle_selfbot` | `.playerbots bot self` | 给真人角色启用/关闭 bot AI。调试能力，不作为常规 Agent 能力。 |
+| `reload_playerbot_config` | `.playerbots bot reload` | 重新读取 Playerbots 配置。通过通用入口时仍由服务端 GM 权限判断。 |
+| `toggle_selfbot` | `.playerbots bot self` | 给真人角色启用/关闭 bot AI。通过通用入口时仍由服务端配置和权限判断。 |
 
 ### L2：上线后自动运行的核心本能
 
@@ -312,10 +344,26 @@ v1.2 增加随机世界 bot 的密语闲聊：C++ 事件上下文会标注 `bot_
 | `healer_safe` | `-healer dps` | 治疗专心奶，降低抢仇恨风险。 |
 | `healer_burst` | `+healer dps` | 允许治疗补输出。 |
 
+Hermes MCP 已支持的第一批队伍指挥 typed tools：
+
+```text
+wow_bot_follow(bot_name="group")
+wow_bot_stay(bot_name="group")
+wow_bot_retreat(bot_name="group", mode="flee|runaway")
+wow_bot_attack_target(bot_name="group")
+wow_bot_pull(bot_name?, pull_back=false)
+wow_bot_ready(bot_name="group")
+wow_bot_burst(bot_name="group")
+wow_focus_heal(bot_name="healers", target_player?, mode="add|remove|clear")
+wow_set_loot_mode(mode="off|normal|gray|all", bot_name="group")
+wow_set_buff(enabled=true|false, bot_name="group")
+wow_set_healer_dps(enabled=false|true, bot_name="healers")
+```
+
 v2 已支持的队伍生命周期动作：
 
 ```text
-summon_bot(role, class_hint, gender?)
+summon_bot(role, class_hint, gender?, race_hint?)
 dismiss_bot(bot_name)
 list_bots()
 lookup_bot_pool()
@@ -330,7 +378,7 @@ invite_player(player_name)
 
 ## 大脑能否调控本能
 
-能，但要通过一层受控的“意图适配器”。不要让 LLM 直接拼 `.playerbots` 命令，更不要直接碰数据库。
+能，但要通过 MCP 这一层基础设施。常用能力仍保留强类型工具；缺口能力走 `wow_run_playerbot_command`，它只进入 PlayerbotMgr，不碰数据库、不走 GM 控制台，最终由 worldserver 按请求玩家的 `.playerbots bot` 权限判断。
 
 推荐接口形态：
 
@@ -344,11 +392,27 @@ invite_player(player_name)
 }
 ```
 
-适配器负责翻译成 Playerbots 小脑语言：
+typed tools 负责翻译成 Playerbots 小脑语言：
 
 ```text
 .playerbots bot addclass priest female
 .playerbots bot init=auto <botName>
+```
+
+Playerbots 原生 `addclass` 只支持职业和性别，不支持种族。若上层指定 `race_hint`，MCP 先查询 AddClass 账号池里的具体候选角色，再执行：
+
+```text
+.playerbots bot add <BotName>
+```
+
+例如“人类女牧师”会先匹配 `class=priest`、`race=human`、`gender=female` 的离线 AddClass 角色，再登录该角色。
+
+通用命令入口则接收 `.playerbots bot` 后面的参数：
+
+```text
+wow_run_playerbot_command(command_line="remove Gessa")
+wow_run_playerbot_command(command_line="refresh Gessa")
+wow_run_playerbot_command(command_line="list")
 ```
 
 或未来直接调用 C++ 内部 API：
@@ -406,7 +470,7 @@ invite_player(target_player)
 .playerbots bot addclass priest
 ```
 
-现状：`addclass` 这类 Playerbots 本能已经可用；“邀请某个真实玩家进队”还需要在 Agent 适配器或 C++ 安全动作层里补一个 `invite_player` 能力，不能只靠当前 `addclass` 命令解决。
+现状：`addclass` 这类 Playerbots 本能已经可用；“邀请某个真实玩家进队”已经通过 `invite_player` 强类型动作落到 C++ 安全动作层，不能用 `addclass` 命令替代。
 
 ## Agent 控制接口路线
 
@@ -425,7 +489,7 @@ invite_player(target_player)
 
 优点：不需要让 Python 伪造玩家会话；bot 可以以自己的身份说话；Playerbots 仍然负责具体战斗和移动。
 
-限制：控制类动作只对 owned/group bot 生效；随机世界 bot 只能密语闲聊；不让 LLM 自由拼英文命令；召唤/删除/初始化仍由玩家手动 `.playerbots bot ...` 操作。
+限制：typed 控制动作只对 owned/group bot 生效；随机世界 bot 只能密语闲聊；通用 `.playerbots bot` 命令入口只进入 PlayerbotMgr 并继承玩家权限，不允许直接数据库、GM 控制台或任意服务端命令。
 
 当前 LLM 运行时使用 OpenAI-compatible Chat Completions。DeepSeek Flash 的推荐配置是：
 

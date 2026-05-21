@@ -29,10 +29,32 @@
 #include "SecretMgr.h"
 #include "StringConvert.h"
 #include "TOTP.h"
+#include "Tokenize.h"
 #include "Util.h"
 #include <boost/lexical_cast.hpp>
 
 using boost::asio::ip::tcp;
+
+namespace
+{
+uint32 GetEffectiveRealmId(uint32 realmId)
+{
+    std::string aliasConfig = sConfigMgr->GetOption<std::string>("RealmList.RealmIDAliases", "");
+    for (std::string_view alias : Acore::Tokenize(aliasConfig, ',', false))
+    {
+        std::vector<std::string_view> pair = Acore::Tokenize(alias, ':', false);
+        if (pair.size() != 2)
+            continue;
+
+        Optional<uint32> publicRealmId = Acore::StringTo<uint32>(pair[0]);
+        Optional<uint32> effectiveRealmId = Acore::StringTo<uint32>(pair[1]);
+        if (publicRealmId && effectiveRealmId && *publicRealmId == realmId)
+            return *effectiveRealmId;
+    }
+
+    return realmId;
+}
+}
 
 enum eAuthCmd
 {
@@ -786,14 +808,16 @@ void AuthSession::RealmListCallback(PreparedQueryResult result)
             pkt << uint8(lock);                             // if 1, then realm locked
 
         pkt << uint8(flag);                                 // RealmFlags
+        uint32 effectiveRealmId = GetEffectiveRealmId(realm.Id.Realm);
+
         pkt << name;
         pkt << boost::lexical_cast<std::string>(realm.GetAddressForClient(GetRemoteIpAddress()));
         pkt << float(realm.PopulationLevel);
-        pkt << uint8(characterCounts[realm.Id.Realm]);
+        pkt << uint8(characterCounts[effectiveRealmId]);
         pkt << uint8(realm.Timezone);                       // realm category
 
         if (_expversion & POST_BC_EXP_FLAG)                 // 2.x and 3.x clients
-            pkt << uint8(realm.Id.Realm);
+            pkt << uint8(effectiveRealmId);
         else
             pkt << uint8(0x0);                              // 1.12.1 and 1.12.2 clients
 

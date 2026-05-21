@@ -1,0 +1,305 @@
+diff --git a/conf/playerbots.conf.dist b/conf/playerbots.conf.dist
+index 3d0866f4..6ce027be 100644
+--- a/conf/playerbots.conf.dist
++++ b/conf/playerbots.conf.dist
+@@ -1244,6 +1244,23 @@ AiPlayerbot.TeleToDalaranWeight = 1
+ # How far randombots are teleported after death
+ AiPlayerbot.RandomBotTeleportDistance = 100
+ 
++# Keep a small stage of idle random bots near real players in the open world.
++# This does not make those bots controllable by players; it only biases where
++# autonomous randombots spend time.
++# Default: 0 (disabled)
++AiPlayerbot.PlayerHotspotBots = 0
++
++# Desired number of random world bots near each eligible real player.
++# Defaults: 6, 10
++AiPlayerbot.PlayerHotspotMinBots = 6
++AiPlayerbot.PlayerHotspotMaxBots = 10
++
++# Radius in yards used for player hotspots, cooldown after moving a bot, and scan interval.
++# Defaults: 120 yards, 600 seconds, 30 seconds
++AiPlayerbot.PlayerHotspotRadius = 120
++AiPlayerbot.PlayerHotspotCooldown = 600
++AiPlayerbot.PlayerHotspotScanInterval = 30
++
+ # How many levels below the lowest-level creature in a zone, can a bot be
+ # This will have no effect if AiPlayerbot.EnableNewRpgStrategy is enabled
+ # Default: 1 (randombot will leave if they are more than 1 level lower)
+diff --git a/src/Bot/RandomPlayerbotMgr.cpp b/src/Bot/RandomPlayerbotMgr.cpp
+index 5c0922fb..49eee50e 100644
+--- a/src/Bot/RandomPlayerbotMgr.cpp
++++ b/src/Bot/RandomPlayerbotMgr.cpp
+@@ -9,6 +9,7 @@
+ 
+ #include <algorithm>
+ #include <boost/thread/thread.hpp>
++#include <cmath>
+ #include <cstdlib>
+ #include <ctime>
+ #include <iomanip>
+@@ -376,6 +377,16 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
+             sRandomPlayerbotMgr.CheckPlayers();
+     }
+ 
++    if (sPlayerbotAIConfig.playerHotspotBots && !players.empty())
++    {
++        uint32 interval = std::max<uint32>(5, sPlayerbotAIConfig.playerHotspotScanInterval);
++        if (time(nullptr) > (PlayerHotspotCheckTimer + interval))
++        {
++            PlayerHotspotCheckTimer = time(nullptr);
++            sRandomPlayerbotMgr.UpdatePlayerHotspots();
++        }
++    }
++
+     if (sPlayerbotAIConfig.randomBotJoinBG /* && !players.empty()*/)
+     {
+         if (time(nullptr) > (BgCheckTimer + 35))
+@@ -1717,6 +1728,189 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation>&
+     //           tlocs.size());
+ }
+ 
++void RandomPlayerbotMgr::UpdatePlayerHotspots()
++{
++    if (!sPlayerbotAIConfig.playerHotspotBots || !sPlayerbotAIConfig.randomBotAutologin || !sPlayerbotAIConfig.enabled)
++        return;
++
++    uint32 moved = 0;
++    std::vector<Player*> snapshot = players;
++    for (Player* player : snapshot)
++    {
++        if (!IsHotspotEligiblePlayer(player))
++            continue;
++
++        uint32 nearby = CountHotspotBotsNear(player);
++        if (nearby >= sPlayerbotAIConfig.playerHotspotMinBots)
++            continue;
++
++        uint32 target = urand(sPlayerbotAIConfig.playerHotspotMinBots, sPlayerbotAIConfig.playerHotspotMaxBots);
++        while (nearby < target)
++        {
++            Player* bot = SelectHotspotBot(player);
++            if (!bot || !TeleportBotNearPlayer(bot, player))
++                break;
++
++            ++nearby;
++            ++moved;
++        }
++    }
++
++    if (moved)
++        LOG_DEBUG("playerbots", "Player hotspot teleported {} random bots near active players.", moved);
++}
++
++bool RandomPlayerbotMgr::IsHotspotEligiblePlayer(Player* player)
++{
++    if (!player || !player->IsInWorld() || player->IsBeingTeleported() || !player->GetSession() ||
++        player->GetSession()->IsBot())
++        return false;
++
++    if (player->IsGameMaster() || player->InBattleground() || player->InArena() || player->InBattlegroundQueue() ||
++        player->HasUnitState(UNIT_STATE_IN_FLIGHT) || player->IsFlying())
++        return false;
++
++    Map* map = player->GetMap();
++    if (!map || map->Instanceable() || map->IsBattlegroundOrArena())
++        return false;
++
++    return true;
++}
++
++uint32 RandomPlayerbotMgr::CountHotspotBotsNear(Player* player)
++{
++    if (!IsHotspotEligiblePlayer(player))
++        return 0;
++
++    float radius = static_cast<float>(std::max<uint32>(40, sPlayerbotAIConfig.playerHotspotRadius));
++    uint32 count = 0;
++    for (PlayerBotMap::const_iterator itr = playerBots.begin(); itr != playerBots.end(); ++itr)
++    {
++        Player* bot = itr->second;
++        if (!bot || !IsRandomBot(bot) || !bot->IsInWorld() || bot->IsBeingTeleported() || !bot->IsAlive())
++            continue;
++
++        if (bot->GetTeamId() != player->GetTeamId() || !player->IsInMap(bot))
++            continue;
++
++        if (player->GetDistance(bot) <= radius)
++            ++count;
++    }
++
++    return count;
++}
++
++bool RandomPlayerbotMgr::IsHotspotCandidate(Player* bot, Player* target)
++{
++    if (!bot || !IsRandomBot(bot) || !IsHotspotEligiblePlayer(target))
++        return false;
++
++    if (!bot->IsInWorld() || bot->IsBeingTeleported() || !bot->IsAlive() || bot->IsInCombat() || bot->GetGroup())
++        return false;
++
++    if (bot->InBattleground() || bot->InArena() || bot->InBattlegroundQueue() ||
++        bot->HasUnitState(UNIT_STATE_IN_FLIGHT) || bot->IsFlying())
++        return false;
++
++    if (bot->GetTeamId() != target->GetTeamId())
++        return false;
++
++    int32 levelDiff = static_cast<int32>(bot->GetLevel()) - static_cast<int32>(target->GetLevel());
++    if (levelDiff < -8 || levelDiff > 8)
++        return false;
++
++    uint32 botId = bot->GetGUID().GetCounter();
++    if (GetEventValue(botId, "player_hotspot"))
++        return false;
++
++    if (target->IsInMap(bot) && target->GetDistance(bot) <= static_cast<float>(sPlayerbotAIConfig.playerHotspotRadius))
++        return false;
++
++    if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot))
++    {
++        if (botAI->HasPlayerNearby(150.0f))
++            return false;
++    }
++
++    return true;
++}
++
++Player* RandomPlayerbotMgr::SelectHotspotBot(Player* player)
++{
++    std::vector<Player*> candidates;
++    for (PlayerBotMap::const_iterator itr = playerBots.begin(); itr != playerBots.end(); ++itr)
++    {
++        Player* bot = itr->second;
++        if (IsHotspotCandidate(bot, player))
++            candidates.push_back(bot);
++    }
++
++    if (candidates.empty())
++        return nullptr;
++
++    std::shuffle(candidates.begin(), candidates.end(), RandomEngine::Instance());
++    return candidates.front();
++}
++
++bool RandomPlayerbotMgr::TeleportBotNearPlayer(Player* bot, Player* player)
++{
++    if (!IsHotspotCandidate(bot, player))
++        return false;
++
++    PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
++    Map* map = player->GetMap();
++    if (!botAI || !map)
++        return false;
++
++    float radius = static_cast<float>(std::max<uint32>(40, sPlayerbotAIConfig.playerHotspotRadius));
++    float minDistance = std::min(80.0f, radius * 0.65f);
++    float maxDistance = std::max(minDistance + 10.0f, radius);
++    constexpr float TwoPi = 6.28318530718f;
++
++    for (uint32 attempt = 0; attempt < 12; ++attempt)
++    {
++        float angle = frand(0.0f, TwoPi);
++        float distance = frand(minDistance, maxDistance);
++        float x = player->GetPositionX() + std::cos(angle) * distance;
++        float y = player->GetPositionY() + std::sin(angle) * distance;
++        float z = player->GetPositionZ();
++
++        float ground = map->GetHeight(player->GetPhaseMask(), x, y, z + 5.0f);
++        if (ground <= INVALID_HEIGHT)
++            continue;
++
++        z = 0.05f + ground;
++        if (map->IsInWater(player->GetPhaseMask(), x, y, z, bot->GetCollisionHeight()))
++            continue;
++
++        AreaTableEntry const* zone = sAreaTableStore.LookupEntry(map->GetZoneId(player->GetPhaseMask(), x, y, z));
++        AreaTableEntry const* area = sAreaTableStore.LookupEntry(map->GetAreaId(player->GetPhaseMask(), x, y, z));
++        if (!zone || !area)
++            continue;
++
++        WorldLocation loc(player->GetMapId(), x, y, z, angle);
++        if (!botAI->StarterLevelDistanceCheck(bot, loc, true))
++            continue;
++
++        bot->GetMotionMaster()->Clear();
++        botAI->Reset(true);
++        bot->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED | AURA_INTERRUPT_FLAG_CHANGE_MAP);
++        bot->TeleportTo(player->GetMapId(), x, y, z, angle);
++        bot->SendMovementFlagUpdate();
++
++        uint32 botId = bot->GetGUID().GetCounter();
++        uint32 cooldown = std::max<uint32>(60, sPlayerbotAIConfig.playerHotspotCooldown);
++        SetEventValue(botId, "player_hotspot", player->GetGUID().GetCounter(), cooldown, player->GetName());
++        ScheduleTeleport(botId, cooldown);
++
++        LOG_DEBUG("playerbots", "Player hotspot moved bot {} near player {} on map {} zone {} area {}.",
++                  bot->GetName(), player->GetName(), player->GetMapId(), zone->ID, area->ID);
++        return true;
++    }
++
++    return false;
++}
++
+ void RandomPlayerbotMgr::PrepareAddclassCache()
+ {
+     // Using accounts marked as type 2 (AddClass)
+diff --git a/src/Bot/RandomPlayerbotMgr.h b/src/Bot/RandomPlayerbotMgr.h
+index b68c77e4..11e1232b 100644
+--- a/src/Bot/RandomPlayerbotMgr.h
++++ b/src/Bot/RandomPlayerbotMgr.h
+@@ -229,6 +229,7 @@ private:
+     time_t BgCheckTimer;
+     time_t LfgCheckTimer;
+     time_t PlayersCheckTimer;
++    time_t PlayerHotspotCheckTimer = 0;
+     time_t RealPlayerLastTimeSeen = 0;
+     time_t DelayLoginBotsTimer;
+     time_t printStatsTimer;
+@@ -237,6 +238,12 @@ private:
+     void ScheduleRandomize(uint32 bot, uint32 time);
+     void RandomTeleport(Player* bot);
+     void RandomTeleport(Player* bot, std::vector<WorldLocation>& locs, bool hearth = false);
++    void UpdatePlayerHotspots();
++    bool IsHotspotEligiblePlayer(Player* player);
++    bool IsHotspotCandidate(Player* bot, Player* target);
++    uint32 CountHotspotBotsNear(Player* player);
++    Player* SelectHotspotBot(Player* player);
++    bool TeleportBotNearPlayer(Player* bot, Player* player);
+     uint32 GetZoneLevel(uint16 mapId, float teleX, float teleY, float teleZ);
+     typedef void (RandomPlayerbotMgr::*ConsoleCommandHandler)(Player*);
+     std::vector<Player*> players;
+diff --git a/src/PlayerbotAIConfig.cpp b/src/PlayerbotAIConfig.cpp
+index 242febd1..af949f03 100644
+--- a/src/PlayerbotAIConfig.cpp
++++ b/src/PlayerbotAIConfig.cpp
+@@ -217,6 +217,14 @@ bool PlayerbotAIConfig::Initialize()
+     permanentlyInWorldTime =
+         sConfigMgr->GetOption<int32>("AiPlayerbot.PermanentlyInWorldTime", 1 * YEAR);
+     randomBotTeleportDistance = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotTeleportDistance", 100);
++    playerHotspotBots = sConfigMgr->GetOption<bool>("AiPlayerbot.PlayerHotspotBots", false);
++    playerHotspotMinBots = sConfigMgr->GetOption<uint32>("AiPlayerbot.PlayerHotspotMinBots", 6);
++    playerHotspotMaxBots = sConfigMgr->GetOption<uint32>("AiPlayerbot.PlayerHotspotMaxBots", 10);
++    if (playerHotspotMaxBots < playerHotspotMinBots)
++        playerHotspotMaxBots = playerHotspotMinBots;
++    playerHotspotRadius = sConfigMgr->GetOption<uint32>("AiPlayerbot.PlayerHotspotRadius", 120);
++    playerHotspotCooldown = sConfigMgr->GetOption<uint32>("AiPlayerbot.PlayerHotspotCooldown", 600);
++    playerHotspotScanInterval = sConfigMgr->GetOption<uint32>("AiPlayerbot.PlayerHotspotScanInterval", 30);
+     randomBotsPerInterval = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotsPerInterval", 60);
+     minRandomBotsPriceChangeInterval =
+         sConfigMgr->GetOption<int32>("AiPlayerbot.MinRandomBotsPriceChangeInterval", 2 * HOUR);
+diff --git a/src/PlayerbotAIConfig.h b/src/PlayerbotAIConfig.h
+index 210e03ef..d7e4ee44 100644
+--- a/src/PlayerbotAIConfig.h
++++ b/src/PlayerbotAIConfig.h
+@@ -142,6 +142,9 @@ public:
+     uint32 permanentlyInWorldTime;
+     uint32 minRandomBotPvpTime, maxRandomBotPvpTime;
+     uint32 randomBotsPerInterval;
++    bool playerHotspotBots;
++    uint32 playerHotspotMinBots, playerHotspotMaxBots;
++    uint32 playerHotspotRadius, playerHotspotCooldown, playerHotspotScanInterval;
+     uint32 minRandomBotsPriceChangeInterval, maxRandomBotsPriceChangeInterval;
+     uint32 disabledWithoutRealPlayerLoginDelay, disabledWithoutRealPlayerLogoutDelay;
+     bool randomBotJoinLfg;

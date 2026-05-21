@@ -1,0 +1,4 @@
+interface:
+  display_name: "AzerothCore PlayerBot Ops"
+  short_description: "Operate, build, deploy, and document the AzerothCore playerbot stack"
+  default_prompt: "Start, stop, restart, inspect logs, verify ports, compile/deploy worldserver with prefix checks, and keep the Playerbot/Hermes architecture docs current."

@@ -1,6 +1,6 @@
 # Agent PlayerBot 路线图
 
-最后核对：2026-05-16
+最后核对：2026-05-21
 
 本文件记录 `playerbot-agent` 分支后续怎么把 Playerbots 的职业本能暴露给上层 Agent。架构和部署真相源仍然是 [ARCHITECTURE-agent-playerbots.md](/home/wuya/git/azerothcore-wotlk-git/ARCHITECTURE-agent-playerbots.md)。
 
@@ -200,6 +200,7 @@ agent_playerbot_combat_summaries
 reply     bot 回复
 command   白名单 Playerbots 聊天快捷命令
 strategy  白名单策略切换
+payload   生命周期、邀请和维护类强类型 payload
 ```
 
 ### v2：强类型 Intent Action
@@ -315,7 +316,7 @@ Adapter 再把它变成实际动作队列。
 | Intent | 参数 | 执行边界 | 说明 |
 | --- | --- | --- | --- |
 | `reply` | `bot`, `channel`, `text` | C++ 桥 | bot 聊天回复。 |
-| `summon_bot` | `role`, `class_hint`, `gender` | C++ 强类型动作 | 从 AddClass 池召唤 bot。 |
+| `summon_bot` | `role`, `class_hint`, `gender`, `race_hint` | MCP/C++ 强类型动作 | 从 AddClass 池召唤 bot；指定种族时 MCP 先选具体角色，再执行 `add <Botname>`。 |
 | `init_bot` | `bot`, `mode=auto` | C++ 强类型动作 | 初始化 AddClass bot。普通玩家默认只允许 `auto`。 |
 | `dismiss_bot` | `bot` | C++ 强类型动作 | 删除可控 bot。对 `*` 需要确认。 |
 | `list_bots` | 无 | C++ 强类型动作 | 返回当前可控 bot 列表。 |
@@ -331,6 +332,22 @@ Adapter 再把它变成实际动作队列。
 | `focus_heal_remove` | `bot`, `player` | command 白名单 | 取消重点治疗。 |
 | `set_strategy` | `bot/group`, `add`, `remove`, `state` | strategy 白名单 | 策略切换，如 `-healer dps`。 |
 
+Hermes MCP 已暴露对应 typed tools：
+
+```text
+wow_bot_follow
+wow_bot_stay
+wow_bot_retreat
+wow_bot_attack_target
+wow_bot_pull
+wow_bot_ready
+wow_bot_burst
+wow_focus_heal
+wow_set_loot_mode
+wow_set_buff
+wow_set_healer_dps
+```
+
 暂不开放：
 
 - 任意 `cast spell`。
@@ -341,7 +358,7 @@ Adapter 再把它变成实际动作队列。
 
 ## 阶段路线图
 
-### v1 已完成：聊天指挥和战斗摘要
+### v1 已完成：聊天指挥、战斗摘要和 MCP 指挥工具
 
 状态：
 
@@ -349,6 +366,7 @@ Adapter 再把它变成实际动作队列。
 - Python 侧车规则优先，LLM 可选。
 - 支持 `reply / command / strategy`。
 - 支持跟随、停下、撤退、攻击、拉怪、重点治疗、拾取、Buff、治疗输出策略。
+- Hermes MCP 已为这些白名单能力提供 typed tools，Agent 不需要直接拼英文 bot 聊天快捷命令。
 - 支持战斗事实聚合和短战斗记忆。
 - 随机世界 bot 密语只允许 `reply/no_reply`。
 
@@ -367,7 +385,7 @@ Adapter 再把它变成实际动作队列。
 新增能力：
 
 - `payload_json` 或等价强类型 payload。
-- `summon_bot(role, class_hint, gender)`。
+- `summon_bot(role, class_hint, gender, race_hint)`。
 - `init_bot(bot, mode=auto)`。
 - `dismiss_bot(bot)`。
 - `list_bots()`。
@@ -563,6 +581,7 @@ Agent 检查：
 - LLM 不直接控制随机世界 bot 的战斗、移动、拾取、治疗。
 - 所有动作必须有白名单。
 - 所有强类型动作必须写执行结果。
+- 所有回复和动作必须绑定当前轮 `current_event_id`；已处理旧事件上的动作默认由 MCP 入队层拒绝。
 - 所有高风险动作必须有权限检查和冷却。
 - 普通玩家默认只能 `init=auto`。
 - `dismiss_bot("*")`、账号类、GM 类、传送类、维护类动作默认不开放。

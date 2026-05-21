@@ -1,0 +1,972 @@
+#!/usr/bin/env python3
+"""Relay AzerothCore PlayerBot events into a remote Hermes Agent conversation."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+from wow_common import (
+    MysqlCli,
+    enqueue_action,
+    env_bool,
+    env_int,
+    fetch_action_results,
+    fetch_events,
+    load_state,
+    log_event,
+    save_state,
+)
+
+
+DEFAULT_HERMES_URL = "http://192.168.1.179:8642/v1/responses"
+REPLY_CHANNELS = {"party", "raid", "say", "whisper"}
+CONTROLLED_BOT_KINDS = {"owned", "group"}
+REPLY_BOT_KINDS = {"owned", "group", "random_world", "anchor_world"}
+ANCHOR_BOT_DEFAULT_NAME = "瓦小狸"
+MAGE_CLASS_ID = 8
+CONSUMABLE_STACK_LIMIT = 5
+CONFIRM_ACTION_TYPES = {
+    "summon_bot",
+    "init_bot",
+    "dismiss_bot",
+    "refresh_bot",
+    "level_bot",
+    "init_instance_quests",
+    "playerbot_command",
+    "invite_player",
+    "provide_consumables",
+    "command",
+    "strategy",
+}
+PENDING_STATUSES = {"", "queued", "pending", "running"}
+ROSTER_ONLINE_RE = re.compile(r"(?<!\S)\+([^,\s]+)")
+QUEST_PROGRESS_PREFIX_RE = re.compile(
+    r"(?:questie|questhelper|carbonite|pfquest|任务插件|任务进度|任务完成|任务目标|目标完成|已完成任务|"
+    r"quest progress|quest complete|objective complete)",
+    re.IGNORECASE,
+)
+QUEST_PROGRESS_COUNT_RE = re.compile(r"(?:\[[^\]]{1,80}\]|任务[^：:]{0,30})[^\n]{0,160}\b\d+\s*/\s*\d+\b")
+QUEST_PROGRESS_DONE_RE = re.compile(r"(?:任务|quest)[^\n]{0,80}(?:完成|complete|completed)", re.IGNORECASE)
+ZH_STACK_NUMBERS = {
+    "一": 1,
+    "两": 2,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+}
+CONSUMABLE_REQUEST_WORDS = ("给", "做", "来", "要", "补", "发", "整", "拿", "弄", "搓", "递", "帮")
+CONSUMABLE_NEGATIVE_WORDS = ("不要", "不用", "别", "无需", "不需要")
+WATER_WORDS = ("水", "喝的", "饮料", "蓝水", "魔法水")
+FOOD_WORDS = ("面包", "吃的", "食物", "干粮", "点心", "魔法餐", "魔法面包")
+BOTH_WORDS = ("吃喝", "水和面包", "水跟面包", "水加面包", "水和吃的", "吃的喝的", "喝的吃的", "水面包")
+CONSUMABLE_EXACT_REQUESTS = {"水", "面包", "吃的", "喝的", "吃喝", "食物", "饮料"}
+TEAM_ONLINE_RE = re.compile(
+    r"(?:队友|队伍|小队|队里|组里|他们|大家|灰名|离线).{0,12}(?:上线|上来|回来|叫回|叫回来|拉回|拉回来|归队)"
+    r"|(?:上线|上来|回来|叫回|叫回来|拉回|拉回来|归队).{0,12}(?:队友|队伍|小队|队里|组里|他们|大家|灰名|离线)"
+)
+
+INSTRUCTIONS = """你是 WoW PlayerBot 队伍级 Agent。
+
+处理输入中的单个 AzerothCore 游戏事件。你可以记住当前队伍目标、玩家纠正、密语上下文和最近行动结果。
+
+硬规则：
+- 只通过 wow_playerbot MCP 工具观察和行动。
+- 不要调用 terminal/file/browser/任意 SQL/GM 命令。
+- 每一轮只处理输入里 current_event_id 指定的这一个事件。所有会回复或执行动作的 MCP 调用都必须传 current_event_id；不要沿用记忆、工具历史或旧诊断里的 event_id。
+- 如果工具返回 stale_event_id，说明你用了旧事件；立刻改用 current_event_id 重试一次，仍失败就用 current_event_id 回复玩家失败原因。
+- 不要凭 map_id/zone_id/area_id 猜地点；必须使用工具或事件中的 map_name/zone_name/area_name。
+- 战斗中的高频技能、治疗、坦克和 DPS 循环交给 playerbots 本能，不要规划逐技能释放。
+- party/raid/say 事件按队伍级上下文处理；whisper 事件只在私聊上下文回答，不要泄露到 party。
+- 随机世界 bot 只能回复，不能控制移动、战斗、组队或策略。
+- 游戏玩家看不到你的最终 assistant 文本；凡是需要让玩家知道答案、失败原因、澄清问题或闲聊回复，都必须调用 wow_reply。
+- 如果你调用了观察工具来回答玩家问题，拿到结论后必须用 wow_reply 发回原请求频道。
+- 固定入口 bot 是“瓦小狸”；say/yell 点名它时由它承接。party/raid 仍按当前队伍上下文回复，只有瓦小狸在当前上下文里时 MCP 才会优先用它。
+- 不要沿用历史里的固定发言人名字。
+- 当玩家问“你是谁/你是什么天赋/你能不能加血/切输出/谁是坦克”等身份、职责、天赋、策略问题时，先调用 wow_get_bot_profile 或 wow_get_supported_bot_strategies；不要凭职业名猜。
+- 如果 profile 里 spec 或 active_strategies 为空，明确说“当前上下文没拿到真实天赋/策略”，不要编造技能、天赋或位置信息。
+- 当玩家让 bot 切职责或流派时，优先用 wow_set_bot_role；只开关单个策略时再用 wow_set_bot_strategy 或专用工具。
+- 当玩家说“队友上线/队伍里的人上线/当前小队里的人上线”时，先用 current_event_id 调 wow_get_party_state 和 wow_get_last_command_diagnostic；能从当前队伍、最近成功动作或玩家点名推断机器人名字时直接处理，不要改问职业配置。
+- “我/你”按当前应答 bot 理解；party/raid/say 默认由瓦小狸承接，whisper 默认由被私聊 bot 承接。回答时要让玩家知道是谁在说话，但保持简短。
+- 任务插件/任务进度刷屏不需要进入对话窗口；玩家问任务时直接使用任务库和角色任务进度工具查询。
+- 如果动作结果连续出现 requester is not online，不要继续重复执行同类动作；用 current_event_id 回复“服务端暂时没找到你的在线会话”，并建议玩家重新发一句指令。
+- 只有消息不需要任何可见回复或动作时，最终文本才写 no_action；不要用 no_action 代替游戏内回答。
+- 如果需要行动，调用相应 wow_playerbot 工具；动作结果或已提交状态也要用 wow_reply 回给玩家。
+- 回复要短但完整；不要为了变短而截断半句话。内容较多时先给摘要，再提示玩家继续问详情。
+"""
+
+
+class HermesClient:
+    def __init__(self, url: str, api_key: str, model: str, timeout: int, trace_raw: bool = False) -> None:
+        self.url = url
+        self.api_key = api_key
+        self.model = model
+        self.timeout = timeout
+        self.trace_raw = trace_raw
+
+    def send_event(self, *, conversation: str, event: dict[str, Any], action_results: list[dict[str, Any]]) -> dict[str, Any]:
+        envelope = {
+            "kind": "wow_playerbot_event",
+            "current_event_id": event.get("id"),
+            "event": event,
+            "recent_action_results": action_results,
+        }
+        payload = {
+            "model": self.model,
+            "conversation": conversation,
+            "instructions": INSTRUCTIONS,
+            "input": (
+                f"处理这个 WoW 事件。current_event_id={event.get('id')}。"
+                "若需要回复或调度 bot，请调用 wow_playerbot MCP 工具，所有动作和回复都传 current_event_id。\n"
+                + json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+            ),
+            "store": True,
+        }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        log_event(
+            "hermes_request",
+            event_id=event.get("id"),
+            conversation=conversation,
+            model=self.model,
+            url=self.url,
+            event_payload=event if self.trace_raw else None,
+            recent_action_results=action_results if self.trace_raw else None,
+        )
+
+        request = urllib.request.Request(
+            self.url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        started = time.monotonic()
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                body = response.read().decode("utf-8", errors="replace")
+                parsed = json.loads(body) if body else {}
+                log_event(
+                    "hermes_response",
+                    event_id=event.get("id"),
+                    conversation=conversation,
+                    status=getattr(response, "status", 0),
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                    response_id=parsed.get("id"),
+                    response_status=parsed.get("status"),
+                    output_text=response_text(parsed),
+                    raw=parsed if self.trace_raw else None,
+                )
+                return parsed
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            log_event(
+                "hermes_http_error",
+                event_id=event.get("id"),
+                conversation=conversation,
+                status=exc.code,
+                body=body[:2000],
+            )
+            raise RuntimeError(f"Hermes HTTP {exc.code}: {body[:400]}") from exc
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            log_event("hermes_error", event_id=event.get("id"), conversation=conversation, error=str(exc))
+            raise RuntimeError(str(exc)) from exc
+
+
+def response_text(value: Any) -> str:
+    """Extract a compact text preview from OpenAI-compatible response shapes."""
+    if not isinstance(value, dict):
+        return ""
+    direct = value.get("output_text")
+    if isinstance(direct, str):
+        return direct[:2000]
+
+    chunks: list[str] = []
+    for item in value.get("output", []) if isinstance(value.get("output"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        for part in item.get("content", []) if isinstance(item.get("content"), list) else []:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str):
+                chunks.append(text)
+    if chunks:
+        return "\n".join(chunks)[:2000]
+
+    message = value.get("message")
+    if isinstance(message, str):
+        return message[:2000]
+    return ""
+
+
+def conversation_for(event: dict[str, Any]) -> str:
+    channel = str(event.get("channel") or "")
+    speaker_guid = int(event.get("speaker_guid") or 0)
+    bot_guid = int(event.get("bot_guid") or 0)
+    leader_guid = int(event.get("group_leader_guid") or 0)
+
+    if channel == "whisper" and bot_guid:
+        return f"wow-whisper-{speaker_guid}-{bot_guid}"
+    if leader_guid:
+        return f"wow-party-{leader_guid}"
+    return f"wow-player-{speaker_guid}"
+
+
+def unique_names(names: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        clean = str(name or "").strip()
+        key = clean.lower()
+        if clean and key not in seen:
+            seen.add(key)
+            result.append(clean)
+    return result
+
+
+def split_config_list(value: str) -> list[str]:
+    return [item.strip() for item in value.replace(";", ",").split(",") if item.strip()]
+
+
+def anchor_bot_name() -> str:
+    return os.getenv("PLAYERBOT_AGENT_ANCHOR_BOT_NAME", ANCHOR_BOT_DEFAULT_NAME).strip()
+
+
+def anchor_bot_aliases() -> list[str]:
+    aliases = [anchor_bot_name(), *split_config_list(os.getenv("PLAYERBOT_AGENT_ANCHOR_ALIASES", "小狸"))]
+    return unique_names(aliases)
+
+
+def message_addresses_anchor(message: str) -> bool:
+    text = str(message or "").strip().lower()
+    if not text:
+        return False
+    return any(alias.lower() in text for alias in anchor_bot_aliases())
+
+
+def is_quest_progress_noise(message: str) -> bool:
+    text = str(message or "").strip()
+    if not text:
+        return False
+    if message_addresses_anchor(text):
+        return False
+    if "?" in text or "？" in text:
+        return False
+
+    lowered = text.lower()
+    if any(word in lowered for word in ("怎么", "如何", "为啥", "为什么")):
+        return False
+
+    has_count = bool(re.search(r"\d+\s*/\s*\d+", text))
+    if QUEST_PROGRESS_PREFIX_RE.search(text) and (has_count or QUEST_PROGRESS_DONE_RE.search(text)):
+        return True
+    if QUEST_PROGRESS_COUNT_RE.search(text):
+        return True
+    return bool(QUEST_PROGRESS_DONE_RE.search(text) and QUEST_PROGRESS_PREFIX_RE.search(text))
+
+
+def should_skip_event(event: dict[str, Any]) -> tuple[bool, str]:
+    channel = str(event.get("channel") or "").strip().lower()
+    message = str(event.get("message") or "")
+    if env_bool("PLAYERBOT_HERMES_IGNORE_QUEST_PROGRESS_CHAT", True) and is_quest_progress_noise(message):
+        return True, "quest_progress_noise"
+    if (
+        env_bool("PLAYERBOT_HERMES_IGNORE_UNADDRESSED_SAY", False)
+        and channel in {"say", "yell"}
+        and not message_addresses_anchor(message)
+    ):
+        return True, "unaddressed_say"
+    return False, ""
+
+
+def compact_message(message: str) -> str:
+    return re.sub(r"\s+", "", str(message or "")).strip().lower()
+
+
+def parse_stack_count(text: str) -> int:
+    digit_match = re.search(r"([1-5])\s*(?:组|份|包)", text)
+    if digit_match:
+        return max(1, min(int(digit_match.group(1)), CONSUMABLE_STACK_LIMIT))
+    for word, value in ZH_STACK_NUMBERS.items():
+        if re.search(rf"{re.escape(word)}\s*(?:组|份|包)", text):
+            return max(1, min(value, CONSUMABLE_STACK_LIMIT))
+    return 1
+
+
+def parse_consumable_request(message: str) -> dict[str, int] | None:
+    text = compact_message(message)
+    if not text:
+        return None
+    if any(word in text for word in CONSUMABLE_NEGATIVE_WORDS):
+        return None
+
+    has_both = any(word in text for word in BOTH_WORDS)
+    has_water = has_both or any(word in text for word in WATER_WORDS)
+    has_food = has_both or any(word in text for word in FOOD_WORDS)
+    if not has_water and not has_food:
+        return None
+
+    has_stack_unit = bool(re.search(r"(?:[1-5一二两三四五]\s*(?:组|份|包))", text))
+    looks_like_request = (
+        any(word in text for word in CONSUMABLE_REQUEST_WORDS)
+        or text in CONSUMABLE_EXACT_REQUESTS
+        or has_both
+        or has_stack_unit
+        or "点" in text
+    )
+    if not looks_like_request:
+        return None
+
+    stacks = parse_stack_count(text)
+    return {
+        "water_stacks": stacks if has_water else 0,
+        "food_stacks": stacks if has_food else 0,
+    }
+
+
+def event_context_sources(event: dict[str, Any]) -> list[dict[str, Any]]:
+    context = event.get("context") if isinstance(event.get("context"), dict) else {}
+    sources: list[Any] = []
+    if isinstance(context.get("target_bot_context"), dict):
+        sources.append(context["target_bot_context"])
+    if isinstance(context.get("bots"), list):
+        sources.extend(context["bots"])
+    if isinstance(context.get("group_members"), list):
+        sources.extend(context["group_members"])
+
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in sources:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        key = name.lower()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def select_mage_bot_name(event: dict[str, Any]) -> str | None:
+    for bot in event_context_sources(event):
+        kind = str(bot.get("bot_kind") or "").strip()
+        if kind not in CONTROLLED_BOT_KINDS:
+            continue
+        try:
+            class_id = int(bot.get("class") or 0)
+        except (TypeError, ValueError):
+            class_id = 0
+        if class_id != MAGE_CLASS_ID:
+            continue
+        if bot.get("alive") is False or bot.get("combat") is True:
+            continue
+        name = str(bot.get("name") or "").strip()
+        if name:
+            return name
+    return None
+
+
+def parse_team_online_request(message: str) -> bool:
+    text = compact_message(message)
+    if not text:
+        return False
+    return bool(TEAM_ONLINE_RE.search(text))
+
+
+def offline_group_bot_names(event: dict[str, Any]) -> list[str]:
+    context = event.get("context") if isinstance(event.get("context"), dict) else {}
+    members = context.get("group_members") if isinstance(context.get("group_members"), list) else []
+    names: list[str] = []
+    for item in members:
+        if not isinstance(item, dict):
+            continue
+        if item.get("online") is not False and item.get("offline_in_group") is not True:
+            continue
+        if item.get("is_bot") is not True and str(item.get("bot_kind") or "") != "group_offline":
+            continue
+        name = str(item.get("name") or "").strip()
+        if name:
+            names.append(name)
+    return unique_names(names)
+
+
+def consumable_request_label(water_stacks: int, food_stacks: int) -> str:
+    if water_stacks and food_stacks:
+        return "吃喝"
+    if water_stacks:
+        return "水"
+    return "吃的"
+
+
+def localized_action_error(error: str) -> str:
+    mapping = {
+        "mage bot is not online or not controllable by requester": "没找到你能控制的在线法师",
+        "target bot is not a mage": "目标机器人不是法师",
+        "mage bot is dead": "法师已经死亡",
+        "mage bot is in combat": "法师还在战斗中",
+        "target player is not online": "目标玩家不在线",
+        "target player is not in requester's group": "目标玩家不在你的队伍里",
+        "target player is not near the mage bot": "目标玩家离法师太远",
+        "target player cannot store consumables; bags may be full": "目标玩家背包可能满了",
+        "empty consumable request": "没有指定要水还是吃的",
+        "requester is not online": "服务端暂时没找到你的在线会话，操作没有执行",
+        "stale_event_id": "这次工具调用用了旧事件，操作已被拦截",
+    }
+    return mapping.get(error.strip(), error.strip() or "服务端没有返回原因")
+
+
+def event_reply_candidate_names(event: dict[str, Any]) -> list[str]:
+    context = event.get("context") if isinstance(event.get("context"), dict) else {}
+    sources: list[Any] = []
+    if isinstance(context.get("bots"), list):
+        sources.extend(context["bots"])
+    if isinstance(context.get("target_bot_context"), dict):
+        sources.append(context["target_bot_context"])
+    if isinstance(context.get("group_members"), list):
+        sources.extend(context["group_members"])
+
+    names: list[str] = []
+    for item in sources:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("bot_kind") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if kind in REPLY_BOT_KINDS and name:
+            names.append(name)
+    return unique_names(names)
+
+
+def roster_online_names(results: list[dict[str, Any]]) -> list[str]:
+    names: list[str] = []
+    for item in results:
+        result = str(item.get("result") or "")
+        if "Bot roster:" not in result:
+            continue
+        names.extend(ROSTER_ONLINE_RE.findall(result))
+    return unique_names(names)
+
+
+def canonical_name(names: list[str], requested: str) -> str | None:
+    wanted = requested.strip().lower()
+    if not wanted:
+        return None
+    for name in names:
+        if name.lower() == wanted:
+            return name
+    return None
+
+
+def anchor_reply_name(names: list[str], avoid_keys: set[str]) -> str | None:
+    aliases = {alias.lower() for alias in anchor_bot_aliases()}
+    if not aliases:
+        return None
+    for name in names:
+        key = name.lower()
+        if key in aliases and key not in avoid_keys:
+            return name
+    return None
+
+
+def select_reply_bot(
+    event: dict[str, Any],
+    results: list[dict[str, Any]],
+    *,
+    requested: str = "",
+    channel: str = "",
+    avoid: set[str] | None = None,
+) -> str | None:
+    avoid_keys = {item.lower() for item in (avoid or set()) if item}
+    names = unique_names(event_reply_candidate_names(event) + roster_online_names(results))
+    requested = requested.strip()
+    normalized_channel = channel.strip().lower()
+
+    if normalized_channel == "whisper":
+        target = requested or str(event.get("bot_name") or "").strip() or str(event.get("target_name") or "").strip()
+        if target:
+            return canonical_name(names, target) or target
+
+    if requested:
+        canonical = canonical_name(names, requested)
+        if canonical and canonical.lower() not in avoid_keys:
+            return canonical
+
+    if normalized_channel != "whisper":
+        anchor = anchor_reply_name(names, avoid_keys)
+        if anchor:
+            return anchor
+
+    for name in names:
+        if name.lower() not in avoid_keys:
+            return name
+
+    if requested:
+        return requested
+    if names:
+        return names[0]
+    return str(event.get("bot_name") or "").strip() or None
+
+
+def successful_visible_reply(results: list[dict[str, Any]]) -> bool:
+    return any(item.get("action_type") == "reply" and item.get("status") == "done" for item in results)
+
+
+def latest_failed_reply(results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for item in results:
+        if item.get("action_type") == "reply" and item.get("status") == "error" and item.get("text"):
+            return item
+    return None
+
+
+def needs_generic_confirmation(results: list[dict[str, Any]]) -> bool:
+    return any(item.get("status") == "done" and item.get("action_type") in CONFIRM_ACTION_TYPES for item in results)
+
+
+def generic_confirmation_text(results: list[dict[str, Any]]) -> str:
+    commands = unique_names(
+        [
+            str(item.get("command") or "")
+            for item in results
+            if item.get("status") == "done" and item.get("action_type") == "command" and item.get("command")
+        ]
+    )
+    if commands:
+        return "已执行：" + "、".join(commands[:4]) + "。"
+
+    action_names = unique_names(
+        [
+            str(item.get("action_type") or "")
+            for item in results
+            if item.get("status") == "done" and item.get("action_type") in CONFIRM_ACTION_TYPES
+        ]
+    )
+    if any(name == "summon_bot" for name in action_names):
+        return "已提交召唤并开始处理。"
+    if any(name == "dismiss_bot" for name in action_names):
+        return "已提交下线。"
+    if any(name == "provide_consumables" for name in action_names):
+        return "已提供法师水和面包。"
+    if action_names:
+        return "已执行。"
+    return "已处理。"
+
+
+class Relay:
+    def __init__(
+        self,
+        db: MysqlCli,
+        client: HermesClient,
+        state_path: Path,
+        *,
+        replay: bool = False,
+        poll_limit: int = 10,
+    ) -> None:
+        self.db = db
+        self.client = client
+        self.state_path = state_path
+        self.poll_limit = poll_limit
+        if replay:
+            self.last_id = 0
+        else:
+            if state_path.exists():
+                self.last_id = load_state(state_path)["last_id"]
+            else:
+                self.last_id = self.db.scalar_int(
+                    "SELECT COALESCE(MAX(`id`), 0) FROM `agent_playerbot_events` "
+                    "WHERE `processed_at` IS NOT NULL"
+                )
+                if not self.last_id:
+                    self.last_id = self.db.scalar_int(
+                        "SELECT COALESCE(MAX(`id`), 0) FROM `agent_playerbot_events`"
+                    )
+
+    def save(self) -> None:
+        save_state(self.state_path, {"last_id": self.last_id})
+
+    def poll_once(self) -> int:
+        events = fetch_events(self.db, after_id=self.last_id, limit=self.poll_limit)
+        for event in events:
+            self.handle_event(event)
+            self.last_id = max(self.last_id, int(event["id"]))
+            self.db.execute(
+                "UPDATE `agent_playerbot_events` SET `processed_at` = NOW() "
+                f"WHERE `id` = {int(event['id'])} AND `processed_at` IS NULL"
+            )
+            self.save()
+        return len(events)
+
+    def handle_event(self, event: dict[str, Any]) -> None:
+        conversation = conversation_for(event)
+        action_results = fetch_action_results(self.db, int(event["id"]), limit=8)
+        skip, skip_reason = should_skip_event(event)
+        if skip:
+            log_event(
+                "relay_event_skipped",
+                event_id=event["id"],
+                conversation=conversation,
+                channel=event["channel"],
+                speaker=event["speaker_name"],
+                message=event["message"],
+                reason=skip_reason,
+                anchor_aliases=anchor_bot_aliases(),
+            )
+            return
+        if self.try_handle_consumable_request(event):
+            return
+        if self.try_handle_team_online_request(event):
+            return
+        log_event(
+            "relay_event",
+            event_id=event["id"],
+            conversation=conversation,
+            channel=event["channel"],
+            speaker=event["speaker_name"],
+            message=event["message"],
+        )
+        self.client.send_event(conversation=conversation, event=event, action_results=action_results)
+        settled_results = self.wait_for_action_results(int(event["id"]))
+        self.ensure_visible_reply(event, settled_results)
+
+    def try_handle_consumable_request(self, event: dict[str, Any]) -> bool:
+        request = parse_consumable_request(str(event.get("message") or ""))
+        if not request:
+            return False
+
+        event_id = int(event["id"])
+        channel = str(event.get("channel") or "party").strip().lower()
+        if channel not in REPLY_CHANNELS:
+            channel = "party"
+
+        water = int(request["water_stacks"])
+        food = int(request["food_stacks"])
+        label = consumable_request_label(water, food)
+        mage_name = select_mage_bot_name(event)
+
+        if not mage_name:
+            log_event(
+                "fast_consumable_no_mage",
+                event_id=event_id,
+                channel=channel,
+                speaker=event.get("speaker_name"),
+                message=event.get("message"),
+                water_stacks=water,
+                food_stacks=food,
+            )
+            self.enqueue_visible_reply(event, f"我没看到你附近有可控法师，先叫个法师再做{label}。", channel=channel)
+            return True
+
+        enqueue_result = enqueue_action(
+            self.db,
+            event=event,
+            action_type="provide_consumables",
+            bot_name=mage_name,
+            payload={
+                "target_player": str(event.get("speaker_name") or "").strip(),
+                "water_stacks": str(water),
+                "food_stacks": str(food),
+                "fast_path": True,
+            },
+        )
+        action_id = int(enqueue_result.get("action_id") or 0)
+        log_event(
+            "fast_consumable_request",
+            event_id=event_id,
+            action_id=action_id,
+            bot=mage_name,
+            channel=channel,
+            speaker=event.get("speaker_name"),
+            message=event.get("message"),
+            water_stacks=water,
+            food_stacks=food,
+            deduped=enqueue_result.get("deduped"),
+        )
+
+        action_result = self.wait_for_action_result(event_id, action_id)
+        error = str(action_result.get("error") or "").strip() if action_result else ""
+        status = str(action_result.get("status") or "").strip().lower() if action_result else ""
+        if status == "done" and not error:
+            reply = f"{label}给你放包里了。"
+        elif error:
+            reply = f"没做成{label}：{localized_action_error(error)}。"
+        else:
+            reply = f"已让{mage_name}做{label}，服务端结果还在等。"
+
+        self.enqueue_visible_reply(event, reply, channel=channel, requested_bot=mage_name)
+        return True
+
+    def try_handle_team_online_request(self, event: dict[str, Any]) -> bool:
+        if not parse_team_online_request(str(event.get("message") or "")):
+            return False
+
+        event_id = int(event["id"])
+        channel = str(event.get("channel") or "party").strip().lower()
+        if channel not in REPLY_CHANNELS:
+            channel = "party"
+
+        targets = offline_group_bot_names(event)
+        if not targets:
+            log_event(
+                "fast_team_online_no_offline_group_bots",
+                event_id=event_id,
+                channel=channel,
+                speaker=event.get("speaker_name"),
+                message=event.get("message"),
+            )
+            self.enqueue_visible_reply(event, "我当前队伍快照里没看到离线机器人队友。", channel=channel)
+            return True
+
+        action_ids: list[int] = []
+        for name in targets:
+            enqueue_result = enqueue_action(
+                self.db,
+                event=event,
+                action_type="playerbot_command",
+                command=f"add {name}",
+                payload={"fast_path": True, "reason": "restore_offline_group_bot", "bot": name},
+            )
+            if enqueue_result.get("action_id"):
+                action_ids.append(int(enqueue_result["action_id"]))
+
+        log_event(
+            "fast_team_online_request",
+            event_id=event_id,
+            action_ids=action_ids,
+            targets=targets,
+            channel=channel,
+            speaker=event.get("speaker_name"),
+            message=event.get("message"),
+        )
+
+        results = self.wait_for_action_results(event_id)
+        done: list[str] = []
+        failed: list[str] = []
+        for name in targets:
+            matched = [
+                item for item in results
+                if item.get("action_type") == "playerbot_command" and str(item.get("command") or "") == f"add {name}"
+            ]
+            if matched and matched[0].get("status") == "done":
+                done.append(name)
+            elif matched and matched[0].get("error"):
+                failed.append(f"{name}：{localized_action_error(str(matched[0].get('error') or ''))}")
+            else:
+                failed.append(f"{name}：服务端结果还在等")
+
+        parts: list[str] = []
+        if done:
+            parts.append("已叫回：" + "、".join(done[:8]))
+        if failed:
+            parts.append("没叫回：" + "；".join(failed[:4]))
+        self.enqueue_visible_reply(event, "。".join(parts) + "。", channel=channel)
+        return True
+
+    def wait_for_action_result(self, event_id: int, action_id: int, timeout_seconds: float = 6.0) -> dict[str, Any] | None:
+        deadline = time.monotonic() + timeout_seconds
+        latest: dict[str, Any] | None = None
+        while time.monotonic() < deadline:
+            results = fetch_action_results(self.db, event_id, limit=20)
+            for item in results:
+                if int(item.get("id") or 0) == action_id:
+                    latest = item
+                    if str(item.get("status") or "").lower() not in PENDING_STATUSES:
+                        return item
+            time.sleep(0.5)
+        return latest
+
+    def enqueue_visible_reply(
+        self,
+        event: dict[str, Any],
+        text: str,
+        *,
+        channel: str,
+        requested_bot: str = "",
+    ) -> None:
+        bot_name = select_reply_bot(event, [], requested=requested_bot, channel=channel)
+        if not bot_name:
+            log_event(
+                "fallback_reply_skipped",
+                event_id=event.get("id"),
+                reason="no_reply_bot",
+                failed_requested_bot=requested_bot,
+            )
+            return
+        enqueue_result = enqueue_action(
+            self.db,
+            event=event,
+            action_type="reply",
+            bot_name=bot_name,
+            channel=channel,
+            text=text,
+            payload={
+                "fallback": True,
+                "fallback_reason": "fast_consumable_result",
+                "requested_bot": requested_bot,
+            },
+        )
+        log_event(
+            "fast_consumable_reply",
+            event_id=event.get("id"),
+            action_id=enqueue_result.get("action_id"),
+            bot=bot_name,
+            channel=channel,
+            text=text,
+            requested_bot=requested_bot,
+            deduped=enqueue_result.get("deduped"),
+        )
+
+    def wait_for_action_results(self, event_id: int, timeout_seconds: float = 6.0) -> list[dict[str, Any]]:
+        deadline = time.monotonic() + timeout_seconds
+        latest: list[dict[str, Any]] = []
+        while time.monotonic() < deadline:
+            latest = fetch_action_results(self.db, event_id, limit=20)
+            if latest and not any(str(item.get("status") or "").lower() in PENDING_STATUSES for item in latest):
+                return latest
+            time.sleep(0.5)
+        return latest
+
+    def ensure_visible_reply(self, event: dict[str, Any], results: list[dict[str, Any]]) -> None:
+        if not results or successful_visible_reply(results):
+            return
+
+        channel = str(event.get("channel") or "party").strip().lower()
+        if channel not in REPLY_CHANNELS:
+            channel = "party"
+
+        failed_reply = latest_failed_reply(results)
+        if failed_reply:
+            text = str(failed_reply.get("text") or "").strip()
+            requested = str(failed_reply.get("bot_name") or "").strip()
+            error = str(failed_reply.get("error") or "").strip()
+            if error == "requester is not online":
+                log_event(
+                    "fallback_reply_skipped",
+                    event_id=event.get("id"),
+                    reason="requester_not_online",
+                    failed_requested_bot=requested,
+                    error=error,
+                )
+                return
+            avoid = {requested} if error == "bot is not online" else set()
+            reason = "retry_failed_reply"
+        elif needs_generic_confirmation(results):
+            text = generic_confirmation_text(results)
+            requested = ""
+            avoid = set()
+            reason = "confirm_action_without_reply"
+        else:
+            return
+
+        bot_name = select_reply_bot(event, results, requested=requested, channel=channel, avoid=avoid)
+        if not bot_name or not text:
+            log_event(
+                "fallback_reply_skipped",
+                event_id=event.get("id"),
+                reason="no_reply_bot" if not bot_name else "empty_text",
+                failed_requested_bot=requested,
+            )
+            return
+
+        enqueue_result = enqueue_action(
+            self.db,
+            event=event,
+            action_type="reply",
+            bot_name=bot_name,
+            channel=channel,
+            text=text,
+            payload={
+                "fallback": True,
+                "fallback_reason": reason,
+                "requested_bot": requested,
+            },
+        )
+        log_event(
+            "fallback_reply_enqueued",
+            event_id=event.get("id"),
+            action_id=enqueue_result.get("action_id"),
+            bot=bot_name,
+            channel=channel,
+            reason=reason,
+            requested_bot=requested,
+            deduped=enqueue_result.get("deduped"),
+        )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Relay PlayerBot bridge events to Hermes")
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--replay", action="store_true")
+    parser.add_argument(
+        "--state",
+        default=os.getenv("PLAYERBOT_HERMES_RELAY_STATE", "var/playerbot-hermes-relay/state.json"),
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    db = MysqlCli.from_env("PLAYERBOT_HERMES_RELAY_DB_DSN")
+    api_key = os.getenv("PLAYERBOT_HERMES_API_KEY", "").strip()
+    if not api_key and not env_bool("PLAYERBOT_HERMES_ALLOW_NO_AUTH", False):
+        print("PLAYERBOT_HERMES_API_KEY must be set unless PLAYERBOT_HERMES_ALLOW_NO_AUTH=1", file=sys.stderr)
+        return 2
+
+    client = HermesClient(
+        os.getenv("PLAYERBOT_HERMES_URL", DEFAULT_HERMES_URL),
+        api_key,
+        os.getenv("PLAYERBOT_HERMES_MODEL", "hermes-agent"),
+        env_int("PLAYERBOT_HERMES_TIMEOUT", 120, 1),
+        trace_raw=env_bool("PLAYERBOT_HERMES_TRACE_RAW", False),
+    )
+    relay = Relay(
+        db,
+        client,
+        Path(args.state),
+        replay=bool(args.replay),
+        poll_limit=env_int("PLAYERBOT_HERMES_POLL_LIMIT", 10, 1),
+    )
+    log_event(
+        "startup",
+        last_id=relay.last_id,
+        hermes_url=client.url,
+        model=client.model,
+        state=str(args.state),
+    )
+    relay.save()
+
+    interval = float(os.getenv("PLAYERBOT_HERMES_POLL_INTERVAL", "1"))
+    while True:
+        try:
+            count = relay.poll_once()
+        except KeyboardInterrupt:
+            log_event("shutdown")
+            return 0
+        except Exception as exc:
+            log_event("poll_error", error=str(exc))
+            if args.once:
+                return 1
+            time.sleep(max(1.0, interval))
+            continue
+
+        if args.once:
+            return 0
+        if not count:
+            time.sleep(interval)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        log_event("shutdown")
+        raise SystemExit(0)

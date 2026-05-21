@@ -9,8 +9,10 @@ AgentPlayerbot.Enabled = 1
 # How often worldserver polls acore_playerbots.agent_playerbot_actions.
 AgentPlayerbot.ActionPollIntervalMs = 500
 
-# Hard cap for text sent by the bridge as bot chat.
-AgentPlayerbot.MaxReplyLength = 220
+# Soft reply byte limit for bridge-sent bot chat.
+# 0 disables bridge-side clipping; prefer prompt/skill guidance for short replies.
+# Positive values keep UTF-8 boundaries and append "..." instead of cutting bytes.
+AgentPlayerbot.MaxReplyLength = 0
 
 # Emit chat/action trace lines to Server.log under module.playerbot_agent.
 AgentPlayerbot.TraceLog = 1
@@ -25,3 +27,12 @@ AgentPlayerbot.CombatTelemetryEnabled = 1
 AgentPlayerbot.CombatIdleEndMs = 5000
 AgentPlayerbot.CombatMinDurationMs = 3000
 AgentPlayerbot.CombatTimelineLimit = 80
+
+# Fixed command-entry bot. The bridge keeps this bot online independently of
+# the random bot pool and accepts /say or /yell only when the message names it
+# (or one of its aliases). If the bot is too far away for /say visibility, the
+# bridge falls back to whisper for that reply.
+AgentPlayerbot.AnchorBotAutologin = 1
+AgentPlayerbot.AnchorBotName = "瓦小狸"
+AgentPlayerbot.AnchorBotAliases = "小狸"
+AgentPlayerbot.AnchorBotEnsureIntervalMs = 5000

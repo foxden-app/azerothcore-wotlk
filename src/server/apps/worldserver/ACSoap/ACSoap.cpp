@@ -20,6 +20,43 @@
 #include "Log.h"
 #include "World.h"
 #include "soapStub.h"
+#include <cctype>
+#include <string>
+
+namespace
+{
+bool StartsWithInsensitive(std::string const& value, char const* prefix)
+{
+    for (std::size_t i = 0; prefix[i]; ++i)
+    {
+        if (i >= value.size())
+            return false;
+
+        unsigned char actual = static_cast<unsigned char>(value[i]);
+        unsigned char expected = static_cast<unsigned char>(prefix[i]);
+        if (std::tolower(actual) != std::tolower(expected))
+            return false;
+    }
+
+    return true;
+}
+
+std::string RedactSoapCommandForLog(char const* command)
+{
+    if (!command)
+        return "";
+
+    std::string value(command);
+    if (StartsWithInsensitive(value, "account create ") || StartsWithInsensitive(value, ".account create "))
+        return "account create <redacted>";
+    if (StartsWithInsensitive(value, "account set password ") || StartsWithInsensitive(value, ".account set password "))
+        return "account set password <redacted>";
+    if (StartsWithInsensitive(value, "account password ") || StartsWithInsensitive(value, ".account password "))
+        return "account password <redacted>";
+
+    return value;
+}
+}
 
 void ACSoapThread(const std::string& host, uint16 port)
 {
@@ -102,7 +139,7 @@ int ns1__executeCommand(soap* soap, char* command, char** result)
     if (!command || !*command)
         return soap_sender_fault(soap, "Command can not be empty", "The supplied command was an empty string");
 
-    LOG_DEBUG("network.soap", "ACSoap: got command '{}'", command);
+    LOG_DEBUG("network.soap", "ACSoap: got command '{}'", RedactSoapCommandForLog(command));
     SOAPCommand connection;
 
     // commands are executed in the world thread. We have to wait for them to be completed
