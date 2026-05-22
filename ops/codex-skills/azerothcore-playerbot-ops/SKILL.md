@@ -47,6 +47,13 @@ If investigating a player report like “瓦小狸不说话”:
 3. Confirm the reporter is online before expecting replies or bot actions; old offline events often fail with `requester is not online`.
 4. If stale events accumulated while relay was broken, mark only those stale rows processed and advance relay state to the latest event, then restart the relay.
 
+Talent and GM-operation truth:
+
+- `wow_set_bot_role` and `wow_set_bot_strategy` change AI strategies only; they do not reset real talents or create a second talent group.
+- For “second spec / dual spec / reset talents / switch talent page” reports, check `wow_get_bot_profile` or the `characters.activeTalentGroup` and `characters.talentGroupsCount` fields first.
+- If the talent group fact is known and `talentGroupsCount < 2`, reply that the target has no second talent group and include the level/config reason when known. RT currently uses `MinDualSpecLevel = 40`, so level-30 bots normally have one group. If the count is unknown, say the talent-page data is unavailable instead of guessing.
+- GM/high-privilege operations are allowed only through MCP tools with explicit audit/admin checks. Wuya has GM authority; do not execute arbitrary terminal, SQL, or raw GM commands on behalf of Hermes.
+
 Useful targeted query:
 
 ```bash
@@ -76,7 +83,15 @@ ssh -p 8022 wuya@38.207.189.99 '/home/wuya/git/azerothcore-wotlk-git/var/playerb
 
 C++/world changes include `modules/mod-playerbot-agent/`, core code, `modules/mod-playerbots/`, SQL source, or runtime binary changes. These require a local build and `env/dist/bin/authserver` plus `env/dist/bin/worldserver`.
 
-If the current dev machine has no `CMakeCache.txt`, no built `worldserver`, or no `env/dist/bin/authserver/worldserver`, do not fake a C++ deploy. Say the build artifacts are absent and either create a proper build or only deploy sidecars/docs.
+`modules/mod-playerbots/` is an ignored external module checkout. If it is absent on a new dev machine, hydrate it before configuring CMake. Prefer the RT production working tree when trying to reproduce production exactly:
+
+```bash
+rsync -az --delete --exclude='.git/' -e 'ssh -p 8022' \
+  wuya@38.207.189.99:/home/wuya/git/azerothcore-wotlk-git/modules/mod-playerbots/ \
+  modules/mod-playerbots/
+```
+
+If the current dev machine has no `CMakeCache.txt`, no built `worldserver`, or no `env/dist/bin/authserver/worldserver`, do not fake a C++ deploy. Create a proper local build or only deploy sidecars/docs.
 
 Expected local build checks before C++ deploy:
 
@@ -89,7 +104,19 @@ test -x env/dist/bin/worldserver
 When build artifacts exist:
 
 ```bash
-cmake --build var/build-agent-release --target authserver worldserver -j4
+cmake -S . -B var/build/obj -G Ninja \
+  -DCMAKE_INSTALL_PREFIX="$PWD/env/dist" \
+  -DAPPS_BUILD=all -DTOOLS_BUILD=none \
+  -DSCRIPTS=static -DMODULES=static \
+  -DBUILD_TESTING=OFF -DUSE_SCRIPTPCH=ON -DUSE_COREPCH=ON \
+  -DCMAKE_BUILD_TYPE=Release -DWITH_WARNINGS=OFF \
+  -DCMAKE_C_COMPILER=/usr/bin/clang \
+  -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+  -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+  -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+  -DBoost_USE_STATIC_LIBS=ON
+cmake --build var/build/obj --target authserver worldserver -j16
+cmake --install var/build/obj --config Release
 ops/rt-wow-migration/deploy.sh deploy-world
 ```
 
@@ -127,6 +154,17 @@ When changing PlayerBot behavior, MCP/Hermes sidecars, RT deploy flow, service t
 - `ROADMAP-agent-playerbots.md` only when the product/implementation roadmap changes
 
 Keep docs concise and factual. Use Chinese prose unless the surrounding file is English-only. Keep runtime paths, ports, service names, and DB names aligned with RT truth.
+
+Cloud docs are part of the operating surface because teammates read there. When updating architecture/runbook/README docs, also update the Tencent Docs copies in the same turn.
+
+- Folder: `AzerothCore PlayerBot RT 文档`
+- Folder URL: `https://docs.qq.com/desktop/mydoc/folder/dCqgFyBeqUwT`
+- Cloud architecture smart doc: `https://docs.qq.com/aio/DZHBDcVVDWE5Ma1F3`
+- Runtime README: `https://docs.qq.com/doc/DZHZaVFRnaFptZVdy`
+- RT runbook: `https://docs.qq.com/doc/DZE9mZmVETnVMdktD`
+- Agent README: `https://docs.qq.com/markdown/DZERueEhFekd1aFR2`
+
+For local Markdown with relative images, upload images with `tencent-docs.upload_image` first and replace local paths with the returned `image_id`; raw Markdown imports will not reliably package relative repo images.
 
 ## Skill Install
 

@@ -84,6 +84,7 @@ BOT_COMMANDS = {
 }
 ADMIN_PLAYER_NAMES_DEFAULT = ""
 ADMIN_GM_LEVEL_DEFAULT = 3
+MIN_DUAL_SPEC_LEVEL_DEFAULT = 40
 AUDITED_PLAYERBOT_COMMAND_PREFIXES = {
     "addaccount",
     "initself",
@@ -852,6 +853,10 @@ def required_admin_gm_level() -> int:
     return env_int("PLAYERBOT_MCP_ADMIN_GM_LEVEL", ADMIN_GM_LEVEL_DEFAULT, 0)
 
 
+def min_dual_spec_level() -> int:
+    return env_int("PLAYERBOT_MCP_MIN_DUAL_SPEC_LEVEL", MIN_DUAL_SPEC_LEVEL_DEFAULT, 1)
+
+
 def event_speaker_name(event: dict[str, Any] | None) -> str:
     if not event:
         return ""
@@ -1269,20 +1274,81 @@ def fetch_character_identity(bot_name: str = "", guid: int = 0) -> dict[str, Any
     }
 
 
+def int_value(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def talent_group_snapshot(name: str = "", guid: int = 0) -> dict[str, int]:
+    try:
+        row = fetch_character_identity(name, guid)
+    except (OSError, RuntimeError) as exc:
+        log_event("tool_bot_profile_talent_snapshot_failed", name=name, guid=int(guid or 0), error=str(exc))
+        return {}
+    if not row:
+        return {}
+    return {
+        "active_talent_group": int(row.get("active_talent_group") or 0),
+        "talent_groups_count": int(row.get("talent_groups_count") or 0),
+    }
+
+
+def talent_group_profile(level: int, active_talent_group: int, talent_groups_count: int) -> dict[str, Any]:
+    count = max(0, int(talent_groups_count or 0))
+    active_index = max(0, int(active_talent_group or 0))
+    min_level = min_dual_spec_level()
+    known = count > 0
+    has_second = count >= 2
+    reason = ""
+    if not known:
+        reason = "当前没有拿到天赋页数量"
+    elif not has_second:
+        reason = f"当前只有{count}套天赋"
+        if int(level or 0) < min_level:
+            reason += f"；服务器双天赋解锁等级是{min_level}级，当前{int(level or 0)}级"
+        else:
+            reason += "；还没有开启第二套天赋"
+    return {
+        "active_index": active_index,
+        "active_label": active_index + 1 if count else 0,
+        "count": count,
+        "known": known,
+        "has_second": has_second,
+        "min_dual_spec_level": min_level,
+        "second_unavailable_reason": reason,
+    }
+
+
 def bot_profile_from_context(bot: dict[str, Any]) -> dict[str, Any]:
     class_id = int(bot.get("class") or 0)
     spec_name = str(bot.get("spec_name") or bot.get("spec") or "").strip().lower()
     strategy_text = bot.get("active_strategy_text") or bot.get("strategy_text") or bot.get("strategies") or ""
     active_strategies = parse_active_strategies(bot.get("active_strategies") if bot.get("active_strategies") else strategy_text)
+    guid = int_value(bot.get("guid"))
+    name = bot_name_from_candidate(bot)
+    active_talent_group = int_value(bot.get("active_talent_group"), int_value(bot.get("activeTalentGroup")))
+    talent_groups_count = int_value(bot.get("talent_groups_count"), int_value(bot.get("talentGroupsCount")))
+    if talent_groups_count <= 0 and (guid or name):
+        snapshot = talent_group_snapshot(name, guid)
+        active_talent_group = int(snapshot.get("active_talent_group", active_talent_group))
+        talent_groups_count = int(snapshot.get("talent_groups_count", talent_groups_count))
+    level = int(bot.get("level") or 0)
     return {
-        "guid": int(bot.get("guid") or 0),
-        "name": bot_name_from_candidate(bot),
+        "guid": guid,
+        "name": name,
         "bot_kind": str(bot.get("bot_kind") or ""),
         "class": class_display(class_id),
         "race": {"id": int(bot.get("race") or 0), "zh": RACE_ZH.get(int(bot.get("race") or 0), "")},
-        "level": int(bot.get("level") or 0),
+        "level": level,
         "role": bot_role(bot) or "unknown",
         "spec": spec_display(spec_name),
+        "active_talent_group": active_talent_group,
+        "talent_groups_count": talent_groups_count,
+        "talent_groups": talent_group_profile(level, active_talent_group, talent_groups_count),
         "ai_state": str(bot.get("ai_state") or "").strip(),
         "active_strategies": active_strategies,
         "supported_strategies": supported_strategy_names(class_id),
@@ -1312,13 +1378,16 @@ def bot_profile_from_context(bot: dict[str, Any]) -> dict[str, Any]:
 
 def bot_profile_from_character(row: dict[str, Any]) -> dict[str, Any]:
     class_id = int(row.get("class") or 0)
+    level = int(row.get("level") or 0)
+    active_talent_group = int(row.get("active_talent_group") or 0)
+    talent_groups_count = int(row.get("talent_groups_count") or 0)
     return {
         "guid": int(row.get("guid") or 0),
         "name": str(row.get("name") or ""),
         "bot_kind": "database_character",
         "class": class_display(class_id),
         "race": {"id": int(row.get("race") or 0), "zh": RACE_ZH.get(int(row.get("race") or 0), "")},
-        "level": int(row.get("level") or 0),
+        "level": level,
         "role": "unknown",
         "spec": {"name": "", "zh": ""},
         "ai_state": "",
@@ -1326,8 +1395,9 @@ def bot_profile_from_character(row: dict[str, Any]) -> dict[str, Any]:
         "supported_strategies": supported_strategy_names(class_id),
         "supported_roles": supported_role_names(class_id),
         "online": bool(row.get("online")),
-        "active_talent_group": int(row.get("active_talent_group") or 0),
-        "talent_groups_count": int(row.get("talent_groups_count") or 0),
+        "active_talent_group": active_talent_group,
+        "talent_groups_count": talent_groups_count,
+        "talent_groups": talent_group_profile(level, active_talent_group, talent_groups_count),
         "truth": {
             "source": "characters_db",
             "spec_available": False,
@@ -2613,7 +2683,7 @@ def build_mcp() -> FastMCP:
 
     @mcp.tool()
     def wow_get_bot_profile(event_id: int, bot_name: str = "") -> dict[str, Any]:
-        """读取某个在线 bot 的真实画像：职业、职责、专精、当前 AI 策略、位置和可切换职责。回答天赋/职责问题前优先调用。"""
+        """读取角色画像：职业、职责、专精、当前 AI 策略、位置、可切换职责和天赋页数量。回答天赋/职责问题前优先调用。"""
         conn = db()
         event = fetch_event(conn, int(event_id))
         if not event:
@@ -2628,7 +2698,7 @@ def build_mcp() -> FastMCP:
                 profile=profile,
                 feedback={
                     "phase": "ready",
-                    "next_suggestion": "回答玩家时只使用 profile 中明确给出的事实；spec 为空就说当前拿不到真实天赋。",
+                    "next_suggestion": "回答玩家时只使用 profile 中明确给出的事实；需要第二天赋但 talent_groups.has_second=false 时，说明没有第二套天赋和原因。",
                 },
             )
 
@@ -2643,7 +2713,7 @@ def build_mcp() -> FastMCP:
             profile=profile,
             feedback={
                 "phase": "partial",
-                "next_suggestion": "只找到了角色数据库身份；如果要问当前策略，需要让该 bot 在线并重新触发事件。",
+                "next_suggestion": "只找到了角色数据库身份；可回答天赋页数量，但当前策略需要该角色在线并重新触发事件。",
             },
         )
 

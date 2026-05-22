@@ -10,9 +10,20 @@
 
 Build artifacts may be absent on a new dev machine. Verify before C++ deploy:
 
-- CMake cache: `var/build-agent-release/CMakeCache.txt` or another known build dir
+- CMake cache: `var/build/obj/CMakeCache.txt`
 - Runtime binaries: `env/dist/bin/authserver`, `env/dist/bin/worldserver`
-- Expected install prefix when using `var/build-agent-release`: `env/dist`
+- Expected install prefix when using `var/build/obj`: `env/dist`
+- Ignored external module: `modules/mod-playerbots/`
+- RT production module source: `/home/wuya/git/azerothcore-wotlk-git/modules/mod-playerbots`
+
+Tencent Docs:
+
+- Folder: `AzerothCore PlayerBot RT 文档`
+- Folder URL: `https://docs.qq.com/desktop/mydoc/folder/dCqgFyBeqUwT`
+- Architecture smart doc: `https://docs.qq.com/aio/DZHBDcVVDWE5Ma1F3`
+- Runtime README: `https://docs.qq.com/doc/DZHZaVFRnaFptZVdy`
+- RT runbook: `https://docs.qq.com/doc/DZE9mZmVETnVMdktD`
+- Agent README: `https://docs.qq.com/markdown/DZERueEhFekd1aFR2`
 
 ## RT Production
 

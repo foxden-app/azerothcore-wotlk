@@ -15,6 +15,14 @@
 
 `modules/mod-playerbots` 是一个本地嵌套 Git checkout，并被根仓库忽略。这符合 AzerothCore 模块的常见使用方式。
 
+新开发机如果缺这个目录，先从 RT 当前生产工作树补齐，保证本地编译和生产模块一致：
+
+```bash
+rsync -az --delete --exclude='.git/' -e 'ssh -p 8022' \
+  wuya@38.207.189.99:/home/wuya/git/azerothcore-wotlk-git/modules/mod-playerbots/ \
+  modules/mod-playerbots/
+```
+
 ## RT 生产路径
 
 - SSH：`ssh -p 8022 wuya@38.207.189.99`
@@ -100,11 +108,35 @@ test -x env/dist/bin/authserver
 test -x env/dist/bin/worldserver
 ```
 
-如果没有本地 build/cache 或运行二进制，不要执行 `deploy-world`；先建立本地构建，或只提交源码/文档/sidecar。具备产物后再执行：
+如果没有本地 build/cache 或运行二进制，不要执行 `deploy-world`；先建立本地构建，或只提交源码/文档/sidecar。
 
 ```bash
-cmake --build var/build-agent-release --target authserver worldserver -j4
+cmake -S . -B var/build/obj -G Ninja \
+  -DCMAKE_INSTALL_PREFIX="$PWD/env/dist" \
+  -DAPPS_BUILD=all -DTOOLS_BUILD=none \
+  -DSCRIPTS=static -DMODULES=static \
+  -DBUILD_TESTING=OFF -DUSE_SCRIPTPCH=ON -DUSE_COREPCH=ON \
+  -DCMAKE_BUILD_TYPE=Release -DWITH_WARNINGS=OFF \
+  -DCMAKE_C_COMPILER=/usr/bin/clang \
+  -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+  -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+  -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+  -DBoost_USE_STATIC_LIBS=ON
+cmake --build var/build/obj --target authserver worldserver -j16
+cmake --install var/build/obj --config Release
 ops/rt-wow-migration/deploy.sh deploy-world
+```
+
+腾讯文档也是当前协作查看面。修改 `ARCHITECTURE-agent-playerbots.md`、本 README 或 RT runbook 后，同一轮同步云端文件夹：
+
+```text
+https://docs.qq.com/desktop/mydoc/folder/dCqgFyBeqUwT
+```
+
+包含相对图片的 Markdown 不要只做原始导入；先把图片上传到腾讯文档并用 `image_id` 替换本地路径。当前架构图云端版：
+
+```text
+https://docs.qq.com/aio/DZHBDcVVDWE5Ma1F3
 ```
 
 ## Git 提交边界
@@ -238,6 +270,14 @@ agent_playerbot_events
 ```
 
 RT 现在同时跑 WoW MCP 服务、事件 relay 和 Hermes 容器。MCP 默认监听 `0.0.0.0:18765`，Hermes 从 RT 本机调用它；T490/当前开发机不再承担生产侧车。
+
+### 天赋与 GM 操作边界
+
+- `wow_get_bot_profile` 会读取角色的 `activeTalentGroup` 和 `talentGroupsCount`。回答“第二天赋、双天赋、重置天赋、切天赋页”前必须先查 profile。
+- `wow_set_bot_role` / `wow_set_bot_strategy` 只切 AI 策略，例如 `+fury`、`-tank`；这不等于真实天赋重洗或切第二天赋。
+- 如果 `talent_groups.known=true` 且 `has_second=false`，瓦小狸应直接回复玩家：该角色没有第二套天赋，并说明 `second_unavailable_reason`。RT 当前 `MinDualSpecLevel=40`，30 级 bot 默认只有一套天赋。若 `known=false`，只能回复“当前没拿到天赋页数据”，不要猜。
+- GM/高权限操作只能走 MCP 暴露的受审计工具。Wuya 这类 GM 角色可以执行允许的高权限工具；非 GM 或不在白名单的角色要明确回复权限不足。
+- 禁止让 Hermes 拼接任意 GM 命令、SQL、terminal 或文件操作。
 
 RT 生产部署文件在 `ops/rt-wow-migration/`，Hermes 模板仍保存在 `ops/hermes-wow/`：
 

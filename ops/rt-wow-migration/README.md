@@ -37,12 +37,25 @@ ops/rt-wow-migration/deploy.sh deploy-world
 pwd
 git status --short --branch
 python3 -m py_compile tools/playerbot-mcp/wow_common.py tools/playerbot-mcp/hermes_relay.py tools/playerbot-mcp/server.py
-find var -name CMakeCache.txt -o -name worldserver -o -name authserver
+test -d modules/mod-playerbots/src/Script || rsync -az --delete --exclude='.git/' -e 'ssh -p 8022' \
+  wuya@38.207.189.99:/home/wuya/git/azerothcore-wotlk-git/modules/mod-playerbots/ \
+  modules/mod-playerbots/
+cmake -S . -B var/build/obj -G Ninja \
+  -DCMAKE_INSTALL_PREFIX="$PWD/env/dist" \
+  -DAPPS_BUILD=all -DTOOLS_BUILD=none \
+  -DSCRIPTS=static -DMODULES=static \
+  -DBUILD_TESTING=OFF -DUSE_SCRIPTPCH=ON -DUSE_COREPCH=ON \
+  -DCMAKE_BUILD_TYPE=Release -DWITH_WARNINGS=OFF \
+  -DCMAKE_C_COMPILER=/usr/bin/clang \
+  -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+  -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+  -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+  -DBoost_USE_STATIC_LIBS=ON
 test -x env/dist/bin/authserver
 test -x env/dist/bin/worldserver
 ```
 
-如果本机没有 CMake cache 或 `env/dist/bin/authserver/worldserver`，只能部署 sidecar 和文档，不能执行 C++/world 部署。RT 不编译。
+如果本机没有 CMake cache 或 `env/dist/bin/authserver/worldserver`，不要执行 C++/world 部署；先按上面的流程建立本地构建并安装产物。RT 不编译。
 
 默认目标：
 
@@ -97,7 +110,8 @@ ssh -p 8022 wuya@38.207.189.99 '/home/wuya/git/azerothcore-wotlk-git/var/playerb
 命令：
 
 ```bash
-cmake --build var/build-agent-release --target authserver worldserver -j4
+cmake --build var/build/obj --target authserver worldserver -j16
+cmake --install var/build/obj --config Release
 ops/rt-wow-migration/deploy.sh deploy-world
 ```
 
@@ -144,6 +158,7 @@ ops/rt-wow-migration/deploy.sh backup-db
   - `RealmID = 1`
   - `RealmZone = 16`
   - `Console.Enable = 0`
+  - `MinDualSpecLevel = 40`
   - `Updates.EnableDatabases = 0`
   - `MySQLExecutable = "/usr/bin/true"`
 - `acore_auth.realmlist`
@@ -207,6 +222,28 @@ ssh -p 8022 wuya@38.207.189.99 'MYSQL_PWD=acore mysql -uacore -e "
 - `瓦小狸 online=0`：查 `AgentPlayerbot.AnchorBotAutologin`、world 日志和 `acore_playerbot_characters.characters`。
 
 RT relay 当前支持 `PLAYERBOT_HERMES_SKIP_BACKLOG_ON_START=1`，重启时会跳过积压旧事件，避免迁移/故障恢复后逐条补跑离线玩家旧消息。
+
+## 典型排障：天赋和 GM 操作
+
+天赋请求分两类：
+
+- “切狂暴/切治疗/切坦克”默认是 AI 策略切换，走 `wow_set_bot_role` 或 `wow_set_bot_strategy`，不等于真实天赋重洗。
+- “第二天赋/双天赋/重置天赋/洗天赋/切天赋页”是真实天赋页操作。先查 profile 或角色库。
+
+检查目标角色是否有第二天赋：
+
+```bash
+ssh -p 8022 wuya@38.207.189.99 'MYSQL_PWD=acore mysql -uacore --default-character-set=utf8mb4 -e "
+  SELECT name,level,online,activeTalentGroup,talentGroupsCount
+  FROM acore_playerbot_characters.characters
+  WHERE name IN (\"Wuya\",\"令狐冲\",\"电子铁拳\",\"快乐铁拳\",\"黑化观音\",\"瓦小狸\")
+  ORDER BY name;
+"'
+```
+
+如果已确认 `talentGroupsCount < 2`，瓦小狸应回复“没有第二套天赋”，并说明 RT 当前 `MinDualSpecLevel=40`，30 级 bot 正常只有一套天赋。拿不到天赋页数量时只能说“当前没拿到天赋页数据”，不要猜，也不要用 AI 策略切换冒充真实第二天赋。
+
+GM/高权限操作只允许走 MCP 已暴露的受审计工具。Wuya 的账号有 GM 权限，可以执行允许的高权限工具；不要让 Hermes 拼任意 GM 命令、SQL 或 shell。
 
 ## RT 独立侧车
 

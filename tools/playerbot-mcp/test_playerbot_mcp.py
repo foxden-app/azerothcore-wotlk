@@ -260,6 +260,8 @@ class CommonTests(unittest.TestCase):
             "role": "healer",
             "bot_kind": "owned",
             "spec_name": "holy",
+            "activeTalentGroup": 0,
+            "talentGroupsCount": 2,
             "ai_state": "combat",
             "active_strategy_text": "Strategies: holy heal, buff, cure",
         }
@@ -269,6 +271,53 @@ class CommonTests(unittest.TestCase):
         self.assertEqual(profile["spec"]["zh"], "神圣")
         self.assertEqual(profile["active_strategies"], ["holy heal", "buff", "cure"])
         self.assertIn("shadow", profile["supported_roles"])
+
+    def test_bot_profile_enriches_talent_groups_from_character_db(self):
+        bot = {
+            "guid": 541,
+            "name": "令狐冲",
+            "class": 1,
+            "race": 4,
+            "level": 30,
+            "role": "tank",
+            "bot_kind": "owned",
+            "spec_name": "prot",
+            "active_strategy_text": "Strategies: tank assist",
+        }
+        row = {
+            "guid": 541,
+            "name": "令狐冲",
+            "race": 4,
+            "class": 1,
+            "level": 30,
+            "online": True,
+            "active_talent_group": 0,
+            "talent_groups_count": 1,
+        }
+
+        with patch("server.fetch_character_identity", return_value=row):
+            profile = server.bot_profile_from_context(bot)
+
+        self.assertEqual(profile["talent_groups_count"], 1)
+        self.assertTrue(profile["talent_groups"]["known"])
+        self.assertFalse(profile["talent_groups"]["has_second"])
+        self.assertIn("当前只有1套天赋", profile["talent_groups"]["second_unavailable_reason"])
+        self.assertIn("40级", profile["talent_groups"]["second_unavailable_reason"])
+
+    def test_talent_group_profile_marks_existing_second_spec(self):
+        profile = server.talent_group_profile(level=30, active_talent_group=1, talent_groups_count=2)
+
+        self.assertTrue(profile["known"])
+        self.assertTrue(profile["has_second"])
+        self.assertEqual(profile["active_label"], 2)
+        self.assertEqual(profile["second_unavailable_reason"], "")
+
+    def test_talent_group_profile_distinguishes_unknown_count(self):
+        profile = server.talent_group_profile(level=30, active_talent_group=0, talent_groups_count=0)
+
+        self.assertFalse(profile["known"])
+        self.assertFalse(profile["has_second"])
+        self.assertEqual(profile["second_unavailable_reason"], "当前没有拿到天赋页数量")
 
     def test_strategy_and_role_support_are_class_aware(self):
         self.assertTrue(server.strategy_supported_for_class(server.CLASS_IDS["priest"], "+shadow"))
