@@ -1,185 +1,161 @@
 ---
 name: azerothcore-playerbot-ops
-description: Operate and maintain the local AzerothCore WotLK playerbot test server. Use when starting, stopping, restarting, health-checking, reading logs, fixing port conflicts, updating systemd units, compiling/deploying worldserver, validating playerbot configuration, updating playerbot/Hermes architecture runbooks, making Chinese commits for this stack, or deciding whether old AzerothCore directories can be removed.
+description: Operate, debug, build, deploy, document, commit, and push the AzerothCore WotLK PlayerBot/Hermes stack. Use when working on RT production, local dev builds, MCP/Hermes relay sidecars, 瓦小狸/playerbot behavior, realmlist lines, systemd/container health, architecture truth docs, Chinese commit messages, or routine compile/deploy/restart troubleshooting.
 ---
 
 # AzerothCore PlayerBot Ops
 
-## Quick Start
+## Current Truth
 
-Use systemd as the default supervisor. This server should not normally run under tmux.
+RT is production. The development machine is for editing, testing, building, and publishing. Do not restart or resurrect T490/local worldserver as production unless the user explicitly asks.
 
-For running GM commands, prefer the dedicated `azerothcore-gm-commands` skill.
+Production shape:
 
-Run the helper script for routine work:
+- RT SSH: `wuya@38.207.189.99 -p 8022`.
+- RT runtime root: `/home/wuya/git/azerothcore-wotlk-git`.
+- RT runs `wow-auth`, `wow-world`, and `hermes-wow` containers.
+- RT runs MCP, Hermes relay, and account register as systemd services.
+- Public realms: `线路一 -> 38.207.189.99:8085`, `线路二 -> 8.162.5.68:8085`.
+- Auth alias: `RealmList.RealmIDAliases = "2:1"`; both realms point to the same worldserver.
+- RT production DBs: `acore_auth`, `acore_playerbot_world`, `acore_playerbot_characters`, `acore_playerbots`.
 
-```bash
-/home/wuya/.codex/skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh status
-/home/wuya/.codex/skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh start
-/home/wuya/.codex/skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh start-stack
-/home/wuya/.codex/skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh restart
-/home/wuya/.codex/skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh stop
-/home/wuya/.codex/skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh build-deploy-world 4
-/home/wuya/.codex/skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh gm 'server info'
-```
-
-Core services:
-
-- `azerothcore-auth.service`: authserver, port `3724`
-- `azerothcore-world.service`: worldserver, port `8085`, SOAP `7879`
-- `azerothcore-playerbot-mcp.service`: local MCP server, port `18765`
-- `azerothcore-playerbot-hermes-relay.service`: game event relay to Hermes
-- `azerothcore-account-register.service`: lightweight account registration page/API
-- `frpc.service`: public tunnel, usually keep running unless the user asks to stop external access
-
-Canonical repo and runtime path:
-
-- Repo: `/home/wuya/git/azerothcore-wotlk-git`
-- Build dir: `/home/wuya/git/azerothcore-wotlk-git/var/build-agent-release`
-- Binaries: `/home/wuya/git/azerothcore-wotlk-git/env/dist/bin`
-- Configs: `/home/wuya/git/azerothcore-wotlk-git/env/dist/etc`
-- Unit templates: `/home/wuya/git/azerothcore-wotlk-git/ops/systemd`
-
-## Operating Rules
-
-Prefer these sequences:
-
-- Start: start `frpc`, then `azerothcore-auth`, then `azerothcore-world`.
-- Full stack start: use `acore-playerbot-ops.sh start-stack`.
-- Stop: stop `azerothcore-world` first, then `azerothcore-auth`; leave `frpc` running unless external access should be closed.
-- Full stack stop for long compiles: use `acore-playerbot-ops.sh stop-stack`; it stops world/auth plus MCP, Hermes relay, and account registration.
-- Restart: stop world, restart auth, start world, then verify ports and logs.
-- Health check: use `acore-playerbot-ops.sh check-all`; confirm services are active, ports `3724/8085/18765` listen, MCP `/health` is OK, and world log has `worldserver-daemon) ready`.
-
-Do not resurrect `/home/wuya/git/azerothcore-wotlk`; that was the old non-playerbot runtime. The old directory may be quarantined as `/home/wuya/git/azerothcore-wotlk.disabled-20260516`.
-
-Use tmux only for an exceptional interactive-console session. systemd is the production-like default. For GM/world commands under systemd, prefer SOAP if credentials are available; otherwise use DB-safe offline changes or temporarily stop systemd and run a controlled foreground/tmux session.
-
-SOAP GM commands use a GM level 3 account. Known admin-capable accounts in this environment include `WUYA_TEST`, `GM`, and `SOAP_PANEL`. Do not store passwords in the skill; pass them with `ACORE_GM_PASS` or enter them interactively.
-
-## Build And Deploy
-
-Use the helper script for `worldserver` build/deploy. It validates the CMake install prefix before compiling or installing; do not manually deploy a binary from a build dir with the wrong prefix.
-
-Expected cache line:
-
-```text
-CMAKE_INSTALL_PREFIX:PATH=/home/wuya/git/azerothcore-wotlk-git/env/dist
-```
-
-Normal incremental compile:
+Primary ops entrypoint from the repo root:
 
 ```bash
-/home/wuya/.codex/skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh build-world 4
+ops/rt-wow-migration/deploy.sh status
+ops/rt-wow-migration/deploy.sh deploy-sidecar
+ops/rt-wow-migration/deploy.sh deploy-world
+ops/rt-wow-migration/deploy.sh backup-db
 ```
 
-Compile and deploy with stack shutdown for CPU/memory headroom:
+Use `RT_HOST=192.168.1.179` only when intentionally targeting RT over LAN.
+
+## First Moves
+
+Before changing anything:
 
 ```bash
-/home/wuya/.codex/skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh build-deploy-world 4
+pwd
+git status --short --branch
+ops/rt-wow-migration/deploy.sh status
 ```
 
-For long compiles, do not stream every progress line to the user. Give one estimate, then check every 5-10 minutes or at phase changes/errors. Keep command output caps small and summarize warnings/errors instead of pasting full build logs.
+If investigating a player report like “瓦小狸不说话”:
 
-Deploy an already-built binary:
+1. Check RT services and ports with `deploy.sh status`.
+2. Check relay/MCP health and recent event/action rows; do not dump full raw relay JSON unless necessary.
+3. Confirm the reporter is online before expecting replies or bot actions; old offline events often fail with `requester is not online`.
+4. If stale events accumulated while relay was broken, mark only those stale rows processed and advance relay state to the latest event, then restart the relay.
+
+Useful targeted query:
 
 ```bash
-/home/wuya/.codex/skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh deploy-world
+ssh -p 8022 wuya@38.207.189.99 'MYSQL_PWD=acore mysql -uacore -e "
+  SELECT id,speaker_name,message,created_at,processed_at
+  FROM acore_playerbots.agent_playerbot_events
+  ORDER BY id DESC LIMIT 12;
+  SELECT id,source_event_id,action_type,status,command,error
+  FROM acore_playerbots.agent_playerbot_actions
+  ORDER BY id DESC LIMIT 12;
+  SELECT name,online
+  FROM acore_playerbot_characters.characters
+  WHERE name IN (\"瓦小狸\",\"小德\",\"Wuya\")
+  ORDER BY name;
+"'
 ```
 
-The script backs up `env/dist/bin/worldserver`, installs `var/build-agent-release/src/server/apps/worldserver`, restarts services, waits for readiness, and fails if startup logs mention `env/agent-release`, `Failed open`, or `Database Playerbots not specified`.
+## Deploy Rules
 
-Only rerun CMake configuration deliberately:
+Sidecar-only changes include `tools/playerbot-mcp/`, `tools/account-register/`, RT systemd unit changes, relay logic, MCP tools, and registration page code.
 
 ```bash
-cmake -S /home/wuya/git/azerothcore-wotlk-git -B /home/wuya/git/azerothcore-wotlk-git/var/build-agent-release -DCMAKE_INSTALL_PREFIX=/home/wuya/git/azerothcore-wotlk-git/env/dist
+python3 -m py_compile tools/playerbot-mcp/wow_common.py tools/playerbot-mcp/hermes_relay.py tools/playerbot-mcp/server.py
+ops/rt-wow-migration/deploy.sh deploy-sidecar
+ssh -p 8022 wuya@38.207.189.99 '/home/wuya/git/azerothcore-wotlk-git/var/playerbot-mcp-venv/bin/python -m unittest /home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/test_playerbot_mcp.py'
 ```
 
-## Common Checks
+C++/world changes include `modules/mod-playerbot-agent/`, core code, `modules/mod-playerbots/`, SQL source, or runtime binary changes. These require a local build and `env/dist/bin/authserver` plus `env/dist/bin/worldserver`.
 
-Status and ports:
+If the current dev machine has no `CMakeCache.txt`, no built `worldserver`, or no `env/dist/bin/authserver/worldserver`, do not fake a C++ deploy. Say the build artifacts are absent and either create a proper build or only deploy sidecars/docs.
+
+Expected local build checks before C++ deploy:
 
 ```bash
-/home/wuya/.codex/skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh check-all
-ss -ltnp | rg ':3724|:8085|:18765'
-pgrep -af 'authserver|worldserver|playerbot-mcp|hermes_relay|account-register'
+find var -name CMakeCache.txt -o -name worldserver -o -name authserver
+test -x env/dist/bin/authserver
+test -x env/dist/bin/worldserver
 ```
 
-Logs:
+When build artifacts exist:
 
 ```bash
-journalctl -u azerothcore-world.service -n 160 --no-pager
-journalctl -u azerothcore-auth.service -n 80 --no-pager
-journalctl -u azerothcore-playerbot-mcp.service -u azerothcore-playerbot-hermes-relay.service -n 160 --no-pager
-/home/wuya/.codex/skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh relay-summary 40
-tail -f /home/wuya/git/azerothcore-wotlk-git/env/dist/logs/playerbot-mcp.log
+cmake --build var/build-agent-release --target authserver worldserver -j4
+ops/rt-wow-migration/deploy.sh deploy-world
 ```
 
-Log hygiene:
+`deploy-world` backs up RT DBs, rebuilds the runtime image from local binary libraries, syncs only auth/world binaries plus SQL/module sources, and restarts RT auth/world. It intentionally does not sync all of `env/dist/bin`, to avoid deleting RT maps/vmaps/mmaps from a new dev machine.
 
-- Do not dump full `playerbot-hermes-relay.log` unless explicitly needed; each JSON line can contain large context, raw model responses, and tool outputs. Prefer `relay-summary`.
-- Do not print full env files, Hermes config, or remote config sections that may include `Authorization`, `API_KEY`, database passwords, or bearer tokens. Use targeted `rg` patterns that show keys/tool names without secret values.
-- When investigating "no response", first use `relay-summary`, `playerbot-mcp.log`, `journalctl -u azerothcore-playerbot-hermes-relay.service`, and MCP `/health`.
-- If a raw log excerpt is necessary, redact secrets and keep only the smallest relevant event.
+## Service And Log Hygiene
 
-Run a GM command through SOAP:
+RT service checks:
 
 ```bash
-ACORE_GM_USER=SOAP_PANEL ACORE_GM_PASS='...' /home/wuya/.codex/skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh gm 'server info'
-/home/wuya/.codex/skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh gm 'teleport name Wuya DeadminesShip'
+ssh -p 8022 wuya@38.207.189.99 'systemctl is-active azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service'
+ssh -p 8022 wuya@38.207.189.99 'ss -ltnp | egrep ":(3724|8085|7879|8642|18765|18080)\b" || true'
+ssh -p 8022 wuya@38.207.189.99 'cd /home/wuya/git/azerothcore-wotlk-git/ops/rt-wow-migration && docker compose ps'
 ```
 
-Expected playerbot startup markers:
-
-- `Playerbot Agent bridge disabled`
-- `MaxRandomBots set to 0`
-- `Account type assignment complete: 0 RNDbot accounts, 10 AddClass accounts, 45 unassigned`
-- `AzerothCore rev. ... (playerbot-agent branch) ... ready`
-
-## Architecture Truth Source
-
-When changing Playerbot Agent, MCP/Hermes skills, sidecar services, GM/audit rules, account registration, or operational workflow, update the truth-source docs in the same change:
-
-- `ARCHITECTURE-agent-playerbots.md`: architecture truth source.
-- `ROADMAP-agent-playerbots.md`: roadmap, status, and next implementation slices.
-- `README-playerbot-agent-runtime.md`: runtime/runbook behavior.
-- `ops/hermes-wow/config.yaml.template`: Hermes MCP tool allowlist and model/runtime config template.
-- `ops/systemd/*.service` and `ops/systemd/*.env.dist`: service/env source templates.
-- `doc/agent-playerbot-architecture.dot`, `.svg`, `.png`: architecture diagram when topology changes.
-
-For architecture docs, write concise Chinese prose unless the surrounding document is already English-only. Keep diagrams and docs consistent with actual ports, service names, env files, and runtime paths.
-
-## Commit Rules
-
-When asked to commit this stack:
-
-- Use a Chinese commit message.
-- Inspect `git status --short` first and avoid reverting unrelated user changes.
-- Include source, tests, systemd/env templates, Hermes templates, and architecture docs that belong to the same behavioral change.
-- Do not commit runtime secrets, API keys, database passwords, generated logs, or local backup binaries.
-- Run at least the relevant Python tests and `git diff --check`; for C++/runtime changes, use the build/deploy script or explicitly state why it was not run.
-
-## Maintenance
-
-Install or refresh systemd unit files from the repo templates:
+Prefer compact logs:
 
 ```bash
-sudo install -m 0644 /home/wuya/git/azerothcore-wotlk-git/ops/systemd/azerothcore-auth.service /etc/systemd/system/azerothcore-auth.service
-sudo install -m 0644 /home/wuya/git/azerothcore-wotlk-git/ops/systemd/azerothcore-world.service /etc/systemd/system/azerothcore-world.service
-sudo systemctl daemon-reload
-sudo systemctl enable azerothcore-auth.service azerothcore-world.service frpc.service
+ssh -p 8022 wuya@38.207.189.99 'journalctl -u azerothcore-playerbot-mcp.service -u azerothcore-playerbot-hermes-relay.service -n 120 --no-pager'
+ssh -p 8022 wuya@38.207.189.99 'tail -120 /home/wuya/git/azerothcore-wotlk-git/env/dist/logs/playerbot-mcp.log'
+ssh -p 8022 wuya@38.207.189.99 'docker logs --tail 160 wow-world'
 ```
 
-Before deleting any old runtime directory:
+Do not print full env files, Hermes config, bearer tokens, API keys, DB passwords, SOAP passwords, or full raw relay JSON. Redact secrets and use narrow `rg`/SQL selections.
 
-1. Verify no live process references it.
-2. Verify no systemd unit or current config references it.
-3. Restart the systemd services and confirm the server is ready.
-4. Prefer quarantining first by renaming the directory. Delete only after the service survives a restart and login test.
+## Architecture Docs
 
-Useful old-reference check:
+When changing PlayerBot behavior, MCP/Hermes sidecars, RT deploy flow, service topology, DB tables, realmlist, or operational rules, update truth-source docs in the same change:
+
+- `ARCHITECTURE-agent-playerbots.md`
+- `README-playerbot-agent-runtime.md`
+- `ops/rt-wow-migration/README.md`
+- `ops/codex-skills/azerothcore-playerbot-ops/`
+- `doc/agent-playerbot-architecture.dot` and rendered `.svg/.png` if topology changes
+- `ROADMAP-agent-playerbots.md` only when the product/implementation roadmap changes
+
+Keep docs concise and factual. Use Chinese prose unless the surrounding file is English-only. Keep runtime paths, ports, service names, and DB names aligned with RT truth.
+
+## Skill Install
+
+The repo copy is the source of truth for this skill. After editing it, refresh the installed Codex skill so new sessions load the same behavior:
 
 ```bash
-rg -n '/home/wuya/git/azerothcore-wotlk(/|"| |$)' /etc/systemd/system /home/wuya/git/azerothcore-wotlk-git/env/dist/etc /home/wuya/.config/systemd/user 2>/dev/null || true
-pgrep -af 'azerothcore-wotlk/|authserver|worldserver|frpc'
+CODEX_HOME_DIR="${CODEX_HOME:-/mnt/c/Users/chuan/.codex}"
+mkdir -p "$CODEX_HOME_DIR/skills"
+rsync -a --delete ops/codex-skills/azerothcore-playerbot-ops/ "$CODEX_HOME_DIR/skills/azerothcore-playerbot-ops/"
 ```
+
+## Commit And Push
+
+When the user asks to commit this stack:
+
+1. Inspect status and diffs; never revert unrelated user changes.
+2. Run relevant tests. For Python sidecar changes, run local syntax checks and RT venv unit tests after deploy. For C++ changes, compile/deploy when build artifacts exist; otherwise state the blocker.
+3. Run `git diff --check`.
+4. Use a Chinese commit message.
+5. In detached HEAD on this repo, push explicitly to `foxden-app`:
+
+```bash
+git add <files>
+git commit -m "中文提交信息"
+git push foxden-app HEAD:playerbot-agent
+```
+
+Do not commit secrets, runtime env files, logs, DB dumps, `ops/rt-wow-migration/libs/`, build directories, backup binaries, or Telegram inbox files.
+
+## Reference
+
+For exact paths and realm values, read `references/paths.md` only when needed.

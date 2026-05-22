@@ -4,6 +4,7 @@ import base64
 import json
 import pathlib
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -18,6 +19,65 @@ import wow_common
 class CommonTests(unittest.TestCase):
     def test_sql_quote_escapes_text(self):
         self.assertEqual(wow_common.sql_quote("a'b\\c\n"), "'a\\'b\\\\c\\n'")
+
+    def test_json_from_b64_repairs_legacy_teamid_control_bytes(self):
+        text = '{"group_members":[{"name":"联盟","team":\x00},{"name":"部落","team":\x01}]}'
+        encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+        payload = wow_common.json_from_b64(encoded)
+
+        self.assertEqual(payload["group_members"][0]["team"], 0)
+        self.assertEqual(payload["group_members"][1]["team"], 1)
+
+    def test_fetch_events_can_filter_unprocessed(self):
+        class FakeDb:
+            sql = ""
+
+            def query_rows(self, sql):
+                self.sql = sql
+                return []
+
+        db = FakeDb()
+        events = wow_common.fetch_events(db, after_id=7, limit=500, unprocessed_only=True)
+
+        self.assertEqual(events, [])
+        self.assertIn("`id` > 7", db.sql)
+        self.assertIn("`processed_at` IS NULL", db.sql)
+        self.assertIn("LIMIT 100", db.sql)
+
+    def test_relay_skip_backlog_on_start_marks_unprocessed_rows(self):
+        class FakeDb:
+            executed = []
+
+            def scalar_int(self, sql):
+                if "COUNT(*)" in sql:
+                    return 3
+                if "WHERE `processed_at` IS NOT NULL" in sql:
+                    return 0
+                if "MAX(`id`)" in sql:
+                    return 15
+                return 0
+
+            def execute(self, sql):
+                self.executed.append(sql)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = FakeDb()
+            state_path = pathlib.Path(tmp) / "state.json"
+            state_path.write_text('{"last_id":7}', encoding="utf-8")
+            relay = hermes_relay.Relay(
+                db,
+                client=object(),
+                state_path=state_path,
+                skip_backlog_on_start=True,
+            )
+
+        self.assertEqual(relay.last_id, 15)
+        self.assertEqual(relay.skipped_backlog, 3)
+        self.assertEqual(len(db.executed), 1)
+        self.assertIn("`id` > 7", db.executed[0])
+        self.assertIn("`id` <= 15", db.executed[0])
+        self.assertIn("`processed_at` IS NULL", db.executed[0])
 
     def test_combat_summary_compact_keeps_key_facts(self):
         facts = {

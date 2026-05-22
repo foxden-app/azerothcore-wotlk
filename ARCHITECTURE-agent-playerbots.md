@@ -1,10 +1,10 @@
 # Agent PlayerBot 架构真相源
 
-最后核对：2026-05-21
+最后核对：2026-05-22
 
 本文件是当前 `playerbot-agent` 分支的架构真相源。部署拓扑、数据库归属、端口、模块边界、Agent 分层和关键设计变化，都以这里为准。
 
-后续 Harness / Planner Agent、Intent Schema 和阶段路线图见：[ROADMAP-agent-playerbots.md](/home/wuya/git/azerothcore-wotlk-git/ROADMAP-agent-playerbots.md)。
+后续 Harness / Planner Agent、Intent Schema 和阶段路线图见：[ROADMAP-agent-playerbots.md](ROADMAP-agent-playerbots.md)。
 
 不要把 API key、bearer token、数据库密码或其他密钥写进本文档。
 
@@ -37,11 +37,13 @@ tools/playerbot-mcp/
 
 2026-05-18 已把 Hermes 模式补到可日常指挥的基础面：MCP 既有召唤、初始化、下线、刷新、升级、任务、邀请等生命周期 typed tools，也暴露了跟随、停留、撤退、攻击、拉怪、ready、重点治疗、拾取、buff、治疗输出策略等低频 command/strategy typed tools。Harness/Hermes 不直接拼聊天快捷命令，优先调用这些 typed tools；未包装的 `.playerbots bot` 子命令才走 `wow_run_playerbot_command` 兜底。
 
-2026-05-20 当前默认运行路径是 Hermes：T490 上的 worldserver、MCP 服务和 Hermes relay 由 systemd 管理；RT 上的 `hermes-wow` 容器承接长期会话、规划、记忆和 MCP 工具调用。固定入口 bot `瓦小狸` 默认在线，`/s`、`/y` 需要点名才转给 Hermes；`/p`、`/raid` 仍走队伍上下文；回复要求短但完整，传输层会拆分长消息，不再硬截断半句话。
+2026-05-20 默认运行路径切到 Hermes：固定入口 bot `瓦小狸` 默认在线，`/s`、`/y` 需要点名才转给 Hermes；`/p`、`/raid` 仍走队伍上下文；回复要求短但完整，传输层会拆分长消息，不再硬截断半句话。
 
 2026-05-21 增加事件边界保护：relay 发送给 Hermes 的每轮输入都带 `current_event_id`，所有会回复或执行动作的 MCP 调用必须使用这个事件 ID。MCP 入队层默认拒绝已处理旧事件上的动作，防止 Agent 记忆污染后拿旧 `event_id` 重复召唤、下线或回复。worldserver 执行动作时使用 connected player 查找请求者，降低玩家明明在线但动作返回 `requester is not online` 的概率。
 
 同日补齐离线队伍成员上下文：私聊瓦小狸时也带发言玩家自己的队伍，`group_members` 会输出队伍名单里的离线 slot；离线 bot 标记为 `group_offline`。relay 对“队友上线/小队回来/灰名叫回”有确定性 fast-path，直接执行 `add <BotName>`，不再让 Hermes 从空队伍快照里猜。
+
+2026-05-22 生产运行从 T490 迁到 RT。RT 同时运行 auth/world 容器、Hermes 容器、MCP、Hermes relay 和注册页；T490/当前开发机只负责写代码、测试、编译和部署，不再作为生产侧车。RT 的 relay 增加 `unprocessed_only` 轮询和 `PLAYERBOT_HERMES_SKIP_BACKLOG_ON_START=1` 积压跳过语义，避免迁移/重启后补跑玩家已经离线的旧事件。`TeamId:uint8` 旧事件 JSON 兼容修复保留在 MCP，同时 C++ 桥已改为输出数值 team。
 
 核心分层：
 
@@ -65,7 +67,7 @@ AzerothCore 世界
   - 地图、角色、战斗、寻路、数据库、网络会话
 ```
 
-Hermes 模式下，`playerbot-agent` 侧车不再直接做 LLM 决策；T490 上的 `playerbot-hermes-relay` 将 `agent_playerbot_events` 推给 RT 上的 Hermes，Hermes 再通过 T490 的 WoW MCP 工具写入 `agent_playerbot_actions`。旧侧车保留为可回滚实现。
+Hermes 模式下，`playerbot-agent` 旧侧车不再直接做 LLM 决策；RT 上的 `playerbot-hermes-relay` 将 `agent_playerbot_events` 推给 RT 上的 Hermes，Hermes 再通过 RT 本机 WoW MCP 工具写入 `agent_playerbot_actions`。旧侧车保留为可回滚实现，但生产不依赖 T490。
 
 大模型不应该每秒决定“按哪个技能”。这类高频行为属于 Playerbots 本能。大模型应该决定“现在需要一个治疗进队”“这句话是在叫我组人”“这波打完先休整”“这个副本需要坦克+治疗+3DPS”。
 
@@ -90,58 +92,51 @@ auth 库:    acore_auth
 公网入口:   38.207.189.99
 ```
 
-### 生产服
-
-生产服 worldserver 当前已停止；共享 authserver 仍在使用。旧生产 world 配置仍在：
+### RT PlayerBot Agent 生产服
 
 ```text
-源码/运行目录: /home/wuya/git/azerothcore-wotlk
-worldserver:  0.0.0.0:8085
-world 库:     acore_world
-角色库:       acore_characters
-```
-
-### PlayerBot Agent 服
-
-```text
-源码/构建目录: /home/wuya/git/azerothcore-wotlk-git
-运行目录:      /home/wuya/git/azerothcore-wotlk-git/env/dist
-进程管理:      systemd
-worldserver:   0.0.0.0:8085
-SOAP:          0.0.0.0:7879
-auth 库:       acore_auth
-world 库:      acore_playerbot_world
-角色库:        acore_playerbot_characters
-Playerbots库:  acore_playerbots
-核心分支:      playerbot-agent
-核心上游:      playerbots-core/Playerbot
-模块:          modules/mod-playerbots
-Agent桥模块:   modules/mod-playerbot-agent
-旧Agent侧车:   tools/playerbot-agent/agent_bridge.py
-Hermes MCP:    tools/playerbot-mcp/server.py，0.0.0.0:18765
-Hermes relay:  tools/playerbot-mcp/hermes_relay.py
-RT Hermes API: http://192.168.1.179:8642/v1/responses
+RT 运行目录:     /home/wuya/git/azerothcore-wotlk-git
+RT compose:      ops/rt-wow-migration/docker-compose.yml
+进程管理:        Docker Compose + systemd
+auth 容器:       wow-auth，0.0.0.0:3724
+world 容器:      wow-world，0.0.0.0:8085
+SOAP:            0.0.0.0:7879
+Hermes 容器:     hermes-wow，0.0.0.0:8642
+MCP systemd:     azerothcore-playerbot-mcp.service，0.0.0.0:18765
+relay systemd:   azerothcore-playerbot-hermes-relay.service
+注册页 systemd:  azerothcore-account-register.service，127.0.0.1:18080
+auth 库:         acore_auth
+world 库:        acore_playerbot_world
+角色库:          acore_playerbot_characters
+Playerbots 库:   acore_playerbots
+核心分支:        playerbot-agent
+核心上游:        playerbots-core/Playerbot
+模块:            modules/mod-playerbots
+Agent 桥模块:    modules/mod-playerbot-agent
+旧 Agent 侧车:   tools/playerbot-agent/agent_bridge.py，生产默认不用
 ```
 
 Realm：
 
 ```text
-id=1  Agent PlayerBot   38.207.189.99:8085
+id=1  线路一  38.207.189.99:8085
+id=2  线路二  8.162.5.68:8085
+authserver.conf: RealmList.RealmIDAliases = "2:1"
 ```
 
-当前 `8085` 是 PlayerBot Agent 服。它复用 `acore_auth`，但使用独立 world/characters/playerbots 数据库，避免污染生产数据。
+两个线路都指向 RT 同一个 worldserver。`8085` 是 PlayerBot Agent 服；它复用 `acore_auth`，但使用独立 world/characters/playerbots 数据库，避免污染旧生产数据。
 
 ## 当前运行策略
 
-本服按“可控 AddClass 小队 + 轻量随机世界 bot”运行。AddClass bot 是玩家/Agent 可调度的小队成员；随机世界 bot 用于营造活跃世界，并允许真人密语触发 LLM 闲聊，但不允许 LLM 控制其移动、战斗、治疗或拾取。
+RT 当前按“可控 AddClass 小队优先、随机世界 bot 关闭”的低负载模式运行。AddClass bot 是玩家/Agent 可调度的小队成员；随机世界 bot 能力保留但默认不开，用于后续压测或世界氛围测试。即使重新打开随机世界 bot，LLM 也只能让它们闲聊回复，不能控制移动、战斗、治疗或拾取。
 
 关键配置：
 
 ```text
 AiPlayerbot.Enabled = 1
-AiPlayerbot.RandomBotAutologin = 1
-AiPlayerbot.MinRandomBots = 30
-AiPlayerbot.MaxRandomBots = 50
+AiPlayerbot.RandomBotAutologin = 0
+AiPlayerbot.MinRandomBots = 0
+AiPlayerbot.MaxRandomBots = 0
 AiPlayerbot.DisabledWithoutRealPlayer = 0
 AiPlayerbot.PlayerHotspotBots = 1
 AiPlayerbot.PlayerHotspotMinBots = 6
@@ -154,7 +149,7 @@ AiPlayerbot.RandomBotJoinBG = 1
 AiPlayerbot.RandomBotTalk = 0
 AiPlayerbot.RandomBotSuggestDungeons = 0
 AiPlayerbot.AddClassCommand = 1
-AiPlayerbot.AddClassAccountPoolSize = 50
+AiPlayerbot.AddClassAccountPoolSize = 10
 AiPlayerbot.ApplyInstanceStrategies = 1
 AiPlayerbot.CombatStrategies = "-healer dps"
 AiPlayerbot.CommandServerPort = 0
@@ -179,7 +174,7 @@ MapUpdate.Threads = 1
 ```text
 PBAGENT* bot 账号: 55
 bot 角色:          550
-AddClass 账号池:   50
+RT 当前 AddClass 池: 10
 测试迁移真人角色: 9
 ```
 
@@ -308,9 +303,9 @@ dk:      blood, frost, unholy, tank assist, pull, aoe
 
 | 能力 | 当前状态 | 原因 |
 | --- | --- | --- |
-| 随机 bot 自动上线 | 已开启 30 到 50 个，并增加 `PlayerHotspotBots` 把空闲 bot 调度到真人附近 | 用于世界氛围；不是 LLM 可控 bot 池。 |
-| 随机 bot 自动进 LFG/BG/竞技场 | 当前允许 LFG/BG 行为，数量受 30 到 50 总量限制 | 用于观察生态，资源压力异常时优先降这里。 |
-| 随机 bot 世界/公会/交易频道聊天 | 已打开基础随机聊天；真人密语随机 bot 会进入 LLM reply-only 流程 | 随机 bot 只可闲聊，不允许控制动作。 |
+| 随机 bot 自动上线 | RT 当前关闭：`RandomBotAutologin=0`、`MinRandomBots=0`、`MaxRandomBots=0` | RT J1900 资源有限，默认优先保证可控 AddClass 小队和 Hermes 链路。 |
+| 随机 bot 自动进 LFG/BG/竞技场 | 配置项保留，但随机 bot 数量为 0 时不会形成实际生态 | 需要测试随机生态时单独打开并观察 CPU/延迟。 |
+| 随机 bot 世界/公会/交易频道聊天 | RT 当前不跑随机世界 bot；真人密语随机 bot 的 reply-only 流程保留在代码路径里 | 随机 bot 只可闲聊，不允许控制动作。 |
 | `.playerbots rndbot ...` | GM/控制台能力：`stats`、`reload`、`update`、`reset`、`init`、`clear`、`level`、`refresh`、`teleport`、`revive`、`grind`、`change_strategy` | 这是随机生态维护接口，不是普通 Agent 本能。需要测试随机生态时单独打开。 |
 | `.playerbots gtask ...` | GM 公会任务维护 | 不属于小队本能。 |
 | `.playerbots pmon/debug ...` | 性能监控/调试 | 运维工具，不给 LLM。 |

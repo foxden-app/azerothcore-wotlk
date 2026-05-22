@@ -1,6 +1,8 @@
 # PlayerBot Agent 运行手册
 
-这是 `playerbot-agent` 分支的本地运行说明。它不是架构设计文档；架构和开发方向以 [ARCHITECTURE-agent-playerbots.md](/home/wuya/git/azerothcore-wotlk-git/ARCHITECTURE-agent-playerbots.md) 为准。
+这是 `playerbot-agent` 分支的运行说明。它不是架构设计文档；架构和开发方向以 [ARCHITECTURE-agent-playerbots.md](ARCHITECTURE-agent-playerbots.md) 为准。
+
+当前生产服务器是 RT。当前开发机只负责写代码、测试、必要时编译，然后通过 `ops/rt-wow-migration/deploy.sh` 发布到 RT。不要把 T490 或本地 WSL worldserver 当成生产服务重启，除非明确是在做本地调试或回滚演练。
 
 ## 源码
 
@@ -13,25 +15,30 @@
 
 `modules/mod-playerbots` 是一个本地嵌套 Git checkout，并被根仓库忽略。这符合 AzerothCore 模块的常见使用方式。
 
-## 运行路径
+## RT 生产路径
 
-- worldserver：`/home/wuya/git/azerothcore-wotlk-git/env/dist/bin/worldserver`
+- SSH：`ssh -p 8022 wuya@38.207.189.99`
+- RT 运行根目录：`/home/wuya/git/azerothcore-wotlk-git`
+- RT Compose：`/home/wuya/git/azerothcore-wotlk-git/ops/rt-wow-migration`
+- Runtime：`/home/wuya/git/azerothcore-wotlk-git/env/dist`
 - worldserver 配置：`/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/worldserver.conf`
 - Playerbots 配置：`/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/modules/playerbots.conf`
 - Agent 桥配置：`/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/modules/playerbot_agent.conf`
-- Agent 侧车环境文件：`/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/playerbot-agent.env`
 - Hermes MCP 环境文件：`/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/playerbot-mcp.env`
 - Hermes Relay 环境文件：`/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/playerbot-hermes-relay.env`
 - 轻量账号注册页环境文件：`/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/account-register.env`
 - 日志目录：`/home/wuya/git/azerothcore-wotlk-git/env/dist/logs`
-- systemd 服务：`azerothcore-auth.service`、`azerothcore-world.service`、`azerothcore-playerbot-agent.service`、`azerothcore-playerbot-mcp.service`、`azerothcore-playerbot-hermes-relay.service`、`azerothcore-account-register.service`
+- 容器：`wow-auth`、`wow-world`、`hermes-wow`
+- systemd 侧车：`azerothcore-playerbot-mcp.service`、`azerothcore-playerbot-hermes-relay.service`、`azerothcore-account-register.service`
 
 端口：
 
 - 共享 authserver：`3724`
 - PlayerBot worldserver：`8085`
 - SOAP：`7879`
-- 账号注册页：`18080`，默认只监听 `127.0.0.1`
+- Hermes API：`8642`
+- MCP：`18765`
+- 账号注册页：`18080`，只监听 `127.0.0.1`
 
 数据库：
 
@@ -42,44 +49,62 @@
 
 Realm：
 
-- `realmlist.id = 1`
-- 名称：`Agent PlayerBot`
-- 地址：`38.207.189.99`
-- 端口：`8085`
+- `id=1`：`线路一`，`38.207.189.99:8085`
+- `id=2`：`线路二`，`8.162.5.68:8085`
+- 两个 realm 通过 `RealmList.RealmIDAliases = "2:1"` 指向同一个 worldserver。
 
 ## 当前调优
 
-这个服现在按“可控 AddClass 小队 + 轻量随机世界 bot”来跑。AddClass bot 用于组队控制；随机世界 bot 用于让有人类玩家附近更热闹，并支持密语闲聊。
+RT 现在按“可控 AddClass 小队优先、随机世界 bot 关闭”的低负载模式跑。AddClass bot 用于组队控制；随机世界 bot 能力保留，但 RT 的 J1900 CPU 不适合默认开 30-50 个随机 bot。
 
 关键配置：
 
-- `AiPlayerbot.RandomBotAutologin = 1`
-- `AiPlayerbot.MinRandomBots = 30`
-- `AiPlayerbot.MaxRandomBots = 50`
+- `AiPlayerbot.RandomBotAutologin = 0`
+- `AiPlayerbot.MinRandomBots = 0`
+- `AiPlayerbot.MaxRandomBots = 0`
 - `AiPlayerbot.PlayerHotspotBots = 1`
 - `AiPlayerbot.PlayerHotspotMinBots = 6`
 - `AiPlayerbot.PlayerHotspotMaxBots = 10`
 - `AiPlayerbot.RandomBotJoinLfg = 1`
 - `AiPlayerbot.RandomBotJoinBG = 1`
-- `AiPlayerbot.AddClassAccountPoolSize = 50`
+- `AiPlayerbot.AddClassAccountPoolSize = 10`
 - `MinWorldUpdateTime = 10`
 - `MapUpdateInterval = 50`
 - `MapUpdate.Threads = 1`
 
-随机 bot 会自动上线，但人类玩家只能把他们当作路人闲聊对象；LLM Adapter 对随机世界 bot 密语只开放 `reply/no_reply`。真正可控的是你召唤进队的 AddClass bot。
+随机 bot 如果后续重新开启，人类玩家只能把他们当作路人闲聊对象；LLM Adapter 对随机世界 bot 密语只开放 `reply/no_reply`。真正可控的是你召唤进队的 AddClass bot。
 
-bot 账号前缀是 `pbagent`。初始数据库里有 55 个 bot 账号、550 个 bot 角色，其中 50 个账号被分配给 AddClass 池。
+bot 账号前缀是 `pbagent`。初始数据库里有 55 个 bot 账号、550 个 bot 角色；RT 当前只启用 10 个 AddClass 池账号。
 
 ## 常用操作
 
-查看状态：
+查看 RT 状态：
 
 ```bash
-systemctl --no-pager --full status azerothcore-auth.service azerothcore-world.service azerothcore-playerbot-agent.service
-ss -ltnp | rg ':8085|:7879|:3724|:3306'
-tail -n 80 env/dist/logs/Server.log
-tail -n 80 env/dist/logs/Playerbots.log
-python3 tools/playerbot-agent/agent_bridge.py --once --rule-only
+ops/rt-wow-migration/deploy.sh status
+```
+
+部署 Python 侧车：
+
+```bash
+python3 -m py_compile tools/playerbot-mcp/wow_common.py tools/playerbot-mcp/hermes_relay.py tools/playerbot-mcp/server.py
+ops/rt-wow-migration/deploy.sh deploy-sidecar
+ssh -p 8022 wuya@38.207.189.99 '/home/wuya/git/azerothcore-wotlk-git/var/playerbot-mcp-venv/bin/python -m unittest /home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/test_playerbot_mcp.py'
+```
+
+部署 C++/world 前必须确认当前开发机有编译产物：
+
+```bash
+find var -name CMakeCache.txt -o -name worldserver -o -name authserver
+test -x env/dist/bin/authserver
+test -x env/dist/bin/worldserver
+```
+
+如果没有本地 build/cache 或运行二进制，不要执行 `deploy-world`；先建立本地构建，或只提交源码/文档/sidecar。具备产物后再执行：
+
+```bash
+cmake --build var/build-agent-release --target authserver worldserver -j4
+ops/rt-wow-migration/deploy.sh deploy-world
 ```
 
 ## Git 提交边界
@@ -102,11 +127,12 @@ python3 tools/playerbot-agent/agent_bridge.py --once --rule-only
 - API key、MCP bearer token、SOAP 密码、注册邀请码、数据库真实密码。
 - `env/dist/logs/`、`var/build-*`、`*.bak-*`、`.telegram-inbox/`、`.antigravitycli/`。
 
-恢复 Codex 运维 skill：
+恢复/刷新 Codex 运维 skill：
 
 ```bash
-mkdir -p ~/.codex/skills
-rsync -a ops/codex-skills/azerothcore-playerbot-ops/ ~/.codex/skills/azerothcore-playerbot-ops/
+CODEX_HOME_DIR="${CODEX_HOME:-/mnt/c/Users/chuan/.codex}"
+mkdir -p "$CODEX_HOME_DIR/skills"
+rsync -a --delete ops/codex-skills/azerothcore-playerbot-ops/ "$CODEX_HOME_DIR/skills/azerothcore-playerbot-ops/"
 ```
 
 恢复 `modules/mod-playerbots` 本地补丁：
@@ -115,25 +141,29 @@ rsync -a ops/codex-skills/azerothcore-playerbot-ops/ ~/.codex/skills/azerothcore
 git -C modules/mod-playerbots apply ../../ops/patches/mod-playerbots-player-hotspot.patch
 ```
 
-跟踪 LLM 和 skill 调用：
+在 RT 上跟踪 MCP/Hermes 调用：
 
 ```bash
-tail -f env/dist/logs/playerbot-agent.log
-tail -f env/dist/logs/Server.log | rg 'module.playerbot_agent|Playerbot Agent'
-
-mysql -h127.0.0.1 -P3306 -uacore -pacore --default-character-set=utf8mb4 acore_playerbots \
+ssh -p 8022 wuya@38.207.189.99 'tail -f /home/wuya/git/azerothcore-wotlk-git/env/dist/logs/playerbot-mcp.log'
+ssh -p 8022 wuya@38.207.189.99 'docker logs -f wow-world | rg "module.playerbot_agent|Playerbot Agent|Queued chat event|Executing action|Action "'
+ssh -p 8022 wuya@38.207.189.99 'MYSQL_PWD=acore mysql -uacore --default-character-set=utf8mb4 acore_playerbots \
   -e "SELECT id, created_at, channel, speaker_name, bot_name, message, LEFT(meta, 1200) AS meta FROM agent_playerbot_events ORDER BY id DESC LIMIT 5\\G"
-
-mysql -h127.0.0.1 -P3306 -uacore -pacore --default-character-set=utf8mb4 acore_playerbots \
+'
+ssh -p 8022 wuya@38.207.189.99 'MYSQL_PWD=acore mysql -uacore --default-character-set=utf8mb4 acore_playerbots \
   -e "SELECT id, source_event_id, status, bot_name, action_type, channel, text, command, strategy, bot_state, payload_json, result, error FROM agent_playerbot_actions ORDER BY id DESC LIMIT 20\\G"
-
-mysql -h127.0.0.1 -P3306 -uacore -pacore --default-character-set=utf8mb4 acore_playerbots \
+'
+ssh -p 8022 wuya@38.207.189.99 'MYSQL_PWD=acore mysql -uacore --default-character-set=utf8mb4 acore_playerbots \
   -e "SELECT id, created_at, group_leader_name, duration_ms, kills, deaths, summary_text, LEFT(facts_json, 1200) AS facts FROM agent_playerbot_combat_summaries ORDER BY id DESC LIMIT 5\\G"
+'
 ```
 
-`playerbot-agent.log` 是大脑侧日志，会记录 `chat_event`、`llm_prompt`、`llm_response`、`llm_skill_mapping`、`combat_summary_seen`、`combat_memory_used`、`decision`、`action_enqueued`。`Server.log` 是小脑执行日志，会记录动作是否执行成 `done`，或被权限/白名单挡成 `error`。数据库里的 `agent_playerbot_actions.status/result/error` 是动作真相源，`agent_playerbot_combat_summaries.summary_text/facts_json` 是战斗记忆真相源。
+数据库里的 `agent_playerbot_actions.status/result/error` 是动作真相源，`agent_playerbot_combat_summaries.summary_text/facts_json` 是战斗记忆真相源。`playerbot-agent.log` 属于旧 Python 侧车回滚路径，生产默认不看它。
 
-安装或刷新 systemd 服务：
+旧本地 systemd/agent 侧车回滚路径：
+
+以下命令只适用于明确要在本地/T490 回滚到旧 `tools/playerbot-agent/agent_bridge.py` 模式时。RT 生产日常不要执行这些命令。
+
+安装或刷新旧本地 systemd 服务：
 
 ```bash
 sudo install -m 0644 ops/systemd/azerothcore-auth.service /etc/systemd/system/azerothcore-auth.service
@@ -207,61 +237,50 @@ agent_playerbot_events
   -> worldserver
 ```
 
-T490 跑 WoW MCP 服务和事件 relay，RT 跑 Hermes 容器。MCP 服务默认监听 `0.0.0.0:18765`，通过 bearer token 接受 Hermes 调用；T490 防火墙只放行 RT 的 LAN 地址访问该端口。
+RT 现在同时跑 WoW MCP 服务、事件 relay 和 Hermes 容器。MCP 默认监听 `0.0.0.0:18765`，Hermes 从 RT 本机调用它；T490/当前开发机不再承担生产侧车。
 
-RT 部署文件在 `ops/hermes-wow/`：
+RT 生产部署文件在 `ops/rt-wow-migration/`，Hermes 模板仍保存在 `ops/hermes-wow/`：
 
-- `compose.yaml`：Hermes 容器，API 端口 `8642` 暴露给 T490，dashboard 端口 `9119` 只绑定 RT 本机。
+- `ops/rt-wow-migration/docker-compose.yml`：`wow-auth`、`wow-world` 的运行镜像和 host network。
+- `ops/rt-wow-migration/systemd/`：RT MCP、relay、注册页 unit 模板。
+- `ops/hermes-wow/compose.yaml`：Hermes 容器模板，API 端口 `8642`，dashboard 端口 `9119` 只绑定 RT 本机。
 - `config.yaml.template`：DeepSeek provider 和 `wow_playerbot` MCP server 配置模板。
 - `wow-playerbot-control/SKILL.md`：给 Hermes 的 WoW 队伍级操作约束。
 
 查看 dashboard 时先开 SSH 隧道：
 
 ```bash
-ssh -p 922 -L 9119:127.0.0.1:9119 wuya@192.168.1.179
+ssh -p 8022 -L 9119:127.0.0.1:9119 wuya@38.207.189.99
 ```
 
 然后在本机打开 `http://127.0.0.1:9119`。
 
-首次安装 T490 服务：
+刷新 RT 侧车：
 
 ```bash
-python3 -m venv var/playerbot-mcp-venv
-var/playerbot-mcp-venv/bin/python -m pip install --upgrade pip wheel setuptools
-var/playerbot-mcp-venv/bin/python -m pip install -r tools/playerbot-mcp/requirements.txt
-test -f env/dist/etc/playerbot-mcp.env || install -m 0600 ops/systemd/playerbot-mcp.env.dist env/dist/etc/playerbot-mcp.env
-test -f env/dist/etc/playerbot-hermes-relay.env || install -m 0600 ops/systemd/playerbot-hermes-relay.env.dist env/dist/etc/playerbot-hermes-relay.env
-sudo install -m 0644 ops/systemd/azerothcore-playerbot-mcp.service /etc/systemd/system/azerothcore-playerbot-mcp.service
-sudo install -m 0644 ops/systemd/azerothcore-playerbot-hermes-relay.service /etc/systemd/system/azerothcore-playerbot-hermes-relay.service
-sudo systemctl daemon-reload
-sudo systemctl enable azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service
+ops/rt-wow-migration/deploy.sh deploy-sidecar
 ```
 
-联调顺序：
+RT 上检查：
 
 ```bash
-sudo systemctl restart azerothcore-playerbot-mcp.service
-curl http://127.0.0.1:18765/health
-
-# RT Hermes 容器就绪后再切流量，避免旧侧车和 Hermes 双响应。
-sudo systemctl stop azerothcore-playerbot-agent.service
-sudo systemctl restart azerothcore-playerbot-hermes-relay.service
+ssh -p 8022 wuya@38.207.189.99 'curl -fsS http://127.0.0.1:18765/health'
+ssh -p 8022 wuya@38.207.189.99 'systemctl is-active azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service'
 ```
 
 日志：
 
 ```bash
-tail -f env/dist/logs/playerbot-mcp.log
-tail -f env/dist/logs/playerbot-hermes-relay.log
-ssh-RT 'cd /home/wuya/srv/hermes-wow && docker compose logs -f hermes-wow'
-ssh-RT 'docker exec hermes-wow tail -f /opt/data/logs/agent.log'
+ssh -p 8022 wuya@38.207.189.99 'tail -f /home/wuya/git/azerothcore-wotlk-git/env/dist/logs/playerbot-mcp.log'
+ssh -p 8022 wuya@38.207.189.99 'journalctl -u azerothcore-playerbot-hermes-relay.service -n 120 --no-pager'
+ssh -p 8022 wuya@38.207.189.99 'docker logs -f hermes-wow'
 ```
 
-`PLAYERBOT_HERMES_TRACE_RAW=1` 时，relay 日志会记录发给 Hermes 的完整事件包、最近动作结果、Hermes 响应文本和原始响应。API key 和 MCP bearer token 只放在 `env/dist/etc/*.env` 与 RT 的 `/home/wuya/.hermes-wow/.env`/`config.yaml`，不要提交到 git。
+`PLAYERBOT_HERMES_TRACE_RAW=1` 时，relay 日志会记录发给 Hermes 的完整事件包、最近动作结果、Hermes 响应文本和原始响应。API key 和 MCP bearer token 只放在 RT 的私有 env/config 文件里，不要提交到 git。
 
 Hermes 的最终 assistant 文本只会进入 relay/Hermes 日志，不会显示在游戏聊天里。玩家需要看见的回答、失败原因、澄清问题或闲聊回复，都必须由 Agent 调用 `wow_reply`；`no_action` 只用于确实不需要可见回复、也不需要动作的背景消息。
 
-relay 每轮都会把当前事件写成 `current_event_id` 发给 Hermes。所有会产生可见回复或游戏动作的 MCP 调用都必须传这个 ID；MCP 入队层默认开启 `PLAYERBOT_MCP_REJECT_PROCESSED_EVENT_ACTIONS=1`，会拒绝已经处理过的旧事件动作，避免 Hermes 沿用历史 `event_id` 后把新指令落到旧上下文。
+relay 每轮都会把当前事件写成 `current_event_id` 发给 Hermes。所有会产生可见回复或游戏动作的 MCP 调用都必须传这个 ID；MCP 入队层默认开启 `PLAYERBOT_MCP_REJECT_PROCESSED_EVENT_ACTIONS=1`，会拒绝已经处理过的旧事件动作，避免 Hermes 沿用历史 `event_id` 后把新指令落到旧上下文。RT relay 还会用 `unprocessed_only` 只取未处理事件；`PLAYERBOT_HERMES_SKIP_BACKLOG_ON_START=1` 会在启动时跳过积压旧事件，避免玩家离线后才补跑。
 
 `wow_reply` 会在 MCP 层自动修正过期发言人：如果 Hermes 沿用历史里的 `Gessa`，但当前事件上下文里只有 `Jeshas` 在线，MCP 会改用当前在线 bot 发送 party/say 回复。relay 还有一层兜底：如果动作已经成功但没有成功的可见回复，或回复因为 `bot is not online` 失败，会自动补发一条短确认或重发原回复。
 
@@ -277,15 +296,13 @@ MCP 和 relay 日志采用 JSON Lines，保留稳定英文 `event` 代码给脚�
 
 MCP 暴露的是基础设施能力，不做上层语义判断。常用队伍操作优先使用 typed tools：`wow_summon_bot`、`wow_init_bot`、`wow_dismiss_bot`、`wow_refresh_bot`、`wow_level_bot`、`wow_init_instance_quests`、`wow_list_bots`、`wow_lookup_bot_pool`、`wow_invite_player`、`wow_bot_follow`、`wow_bot_stay`、`wow_bot_retreat`、`wow_bot_attack_target`、`wow_bot_pull`、`wow_bot_ready`、`wow_bot_burst`、`wow_focus_heal`、`wow_set_loot_mode`、`wow_set_buff`、`wow_set_healer_dps`。`wow_summon_bot` 支持可选 `race_hint`；指定种族时，MCP 会先从 AddClass 池里选择匹配角色，再执行 `add <Botname>`，不要让 Hermes 拼 `addclass priest human female` 这种原生命令不支持的语法。后续缺工具时，Hermes 可以先查 `wow_get_playerbot_command_catalog`，再用 `wow_run_playerbot_command` 执行任意服务端支持的 `.playerbots bot` 参数；`command_line` 优先只写 `.playerbots bot` 后面的部分，例如 `remove Gessa`、`init=auto Gessa`、`addclass priest female`，也兼容完整 `.playerbots bot ...` 或 `.bot ...`。实际权限和失败原因由 worldserver 的 PlayerbotMgr 判断，结果以 `agent_playerbot_actions.status/result/error` 和 `wow_get_action_results` 为准。
 
-回滚：
+RT 紧急停掉 Hermes 侧车：
 
 ```bash
-sudo systemctl stop azerothcore-playerbot-hermes-relay.service
-sudo systemctl stop azerothcore-playerbot-mcp.service
-sudo systemctl restart azerothcore-playerbot-agent.service
+ssh -p 8022 wuya@38.207.189.99 'sudo systemctl stop azerothcore-playerbot-hermes-relay.service azerothcore-playerbot-mcp.service'
 ```
 
-侧车配置统一写在 `env/dist/etc/playerbot-agent.env`。默认是规则模式：
+旧本地 Python 侧车配置统一写在 `env/dist/etc/playerbot-agent.env`。它是回滚/实验路径，不是 RT 生产默认路径。默认是规则模式：
 
 ```bash
 PLAYERBOT_AGENT_RULE_ONLY="1"
@@ -312,25 +329,29 @@ PLAYERBOT_AGENT_PROMPT_MESSAGE_LIMIT="40"
 
 侧车会把最近聊天作为短期工作记忆带进 prompt，包含队伍聊天、附近说话和发给 bot 的密语目标。默认从事件表恢复最近 `240` 条、`4` 小时内的消息，每次 prompt 最多带最近 `40` 条。跨天摘要、玩家画像、队伍长期目标和计划回放应放到后续 Harness Agent 的记忆层，而不是让侧车无限扩大 prompt。
 
-改完 env 后重启侧车：
+改完旧本地 env 后重启旧侧车：
 
 ```bash
 sudo systemctl restart azerothcore-playerbot-agent.service
 ```
 
-没有 LLM key 或 `PLAYERBOT_AGENT_RULE_ONLY="1"` 时，侧车会以规则模式运行，仍支持“跟我、停下、加我、安心奶、捡垃圾”等中文指令。
+没有 LLM key 或 `PLAYERBOT_AGENT_RULE_ONLY="1"` 时，旧侧车会以规则模式运行，仍支持“跟我、停下、加我、安心奶、捡垃圾”等中文指令。
 
-## Agent v1 数据流
+## 当前生产数据流
 
 ```text
 玩家聊天
   -> mod-playerbot-agent
   -> acore_playerbots.agent_playerbot_events
-  -> tools/playerbot-agent/agent_bridge.py
+  -> tools/playerbot-mcp/hermes_relay.py
+  -> RT hermes-wow
+  -> tools/playerbot-mcp/server.py
   -> acore_playerbots.agent_playerbot_actions
   -> mod-playerbot-agent
   -> Playerbots 小脑
 ```
+
+旧 v1 规则侧车 `tools/playerbot-agent/agent_bridge.py` 仍保留为回滚路径。
 
 worldserver 首次启动新模块时会自动创建：
 
@@ -368,18 +389,10 @@ agent_playerbot_combat_summaries
 
 ## 主机资源
 
-2026-05-08 已新增一个 12G swap 文件：
-
-```text
-/swap-playerbot.img
-```
-
-原来的 `/swap.img` 仍然保留，所以总 swap 约 16G。新增 swap 已写入 `/etc/fstab`，重启后会自动启用。
-
-当前主要资源消耗通常来自：
+RT 是 J1900/约 8GB 内存的小机器，只适合轻量生产和朋友试玩。当前主要资源消耗通常来自：
 
 - PlayerBot `worldserver`
-- VS Code server
 - MySQL
+- Hermes
 
-FRP、foxden 网站和 foxhole-postgres 相对很轻，不是当前资源压力的主要来源。
+随机世界 bot 默认关闭。需要提高在线机器人数量时，应先低量试跑并观察 `docker stats`、world update diff 和玩家延迟。

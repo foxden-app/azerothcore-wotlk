@@ -1,0 +1,16 @@
+[Unit]
+Description=FRP Client for AzerothCore Line 2 on RT
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wuya
+Group=wuya
+WorkingDirectory=/home/wuya/dev/frp
+ExecStart=/home/wuya/dev/frp/frpc -c /home/wuya/dev/frp/frpc-chml-unicom.toml
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

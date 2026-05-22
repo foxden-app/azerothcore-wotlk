@@ -21,6 +21,7 @@ DEFAULT_CHARACTERS_DB_DSN = "127.0.0.1;3306;acore;acore;acore_playerbot_characte
 
 EVENT_ZH: dict[str, str] = {
     "startup": "服务启动",
+    "startup_backlog_skipped": "启动时跳过积压事件",
     "shutdown": "服务停止",
     "poll_error": "轮询异常",
     "relay_event": "转发游戏事件",
@@ -235,7 +236,23 @@ def json_from_b64(value: str | None) -> dict[str, Any]:
         payload = json.loads(text)
         return payload if isinstance(payload, dict) else {}
     except json.JSONDecodeError:
-        return {}
+        repaired = repair_legacy_teamid_json(text)
+        if repaired == text:
+            return {}
+        try:
+            payload = json.loads(repaired)
+            return payload if isinstance(payload, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+
+def repair_legacy_teamid_json(text: str) -> str:
+    """Repair old event meta where C++ streamed TeamId:uint8 as raw bytes."""
+    return (
+        text.replace('"team":\x00', '"team":0')
+        .replace('"team":\x01', '"team":1')
+        .replace('"team":\x02', '"team":2')
+    )
 
 
 def clean_wow_text(text: str) -> str:
@@ -309,14 +326,24 @@ def event_row_to_dict(row: list[str | None]) -> dict[str, Any]:
     }
 
 
-def fetch_events(db: MysqlCli, *, after_id: int = 0, limit: int = 20) -> list[dict[str, Any]]:
+def fetch_events(
+    db: MysqlCli,
+    *,
+    after_id: int = 0,
+    limit: int = 20,
+    unprocessed_only: bool = False,
+) -> list[dict[str, Any]]:
     bounded_limit = max(1, min(int(limit), 100))
+    filters = [f"`id` > {int(after_id)}"]
+    if unprocessed_only:
+        filters.append("`processed_at` IS NULL")
+    where = " AND ".join(filters)
     rows = db.query_rows(
         "SELECT `id`, `created_at`, `channel`, `speaker_guid`, `speaker_account`, `speaker_name`, "
         "`target_guid`, `target_name`, `bot_guid`, `bot_name`, `group_leader_guid`, "
         "TO_BASE64(COALESCE(`meta`, '')), TO_BASE64(`message`) "
         "FROM `agent_playerbot_events` "
-        f"WHERE `id` > {int(after_id)} ORDER BY `id` ASC LIMIT {bounded_limit}"
+        f"WHERE {where} ORDER BY `id` ASC LIMIT {bounded_limit}"
     )
     return [event_row_to_dict(row) for row in rows]
 

@@ -1077,7 +1077,7 @@ std::string OfflineGroupMemberToJson(Group::MemberSlot const& slot)
         out << ",\"class\":" << static_cast<uint32>(cache->Class)
             << ",\"race\":" << static_cast<uint32>(cache->Race)
             << ",\"level\":" << static_cast<uint32>(cache->Level)
-            << ",\"team\":" << Player::TeamIdForRace(cache->Race);
+            << ",\"team\":" << static_cast<uint32>(Player::TeamIdForRace(cache->Race));
     }
 
     out << "}";

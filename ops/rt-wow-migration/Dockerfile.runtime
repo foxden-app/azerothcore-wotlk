@@ -1,0 +1,6 @@
+FROM ubuntu:24.04
+
+ENV TZ=Asia/Shanghai
+ENV LD_LIBRARY_PATH=/opt/acore-libs
+
+COPY libs/ /opt/acore-libs/

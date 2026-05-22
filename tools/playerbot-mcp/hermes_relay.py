@@ -571,11 +571,13 @@ class Relay:
         *,
         replay: bool = False,
         poll_limit: int = 10,
+        skip_backlog_on_start: bool = False,
     ) -> None:
         self.db = db
         self.client = client
         self.state_path = state_path
         self.poll_limit = poll_limit
+        self.skipped_backlog = 0
         if replay:
             self.last_id = 0
         else:
@@ -590,12 +592,26 @@ class Relay:
                     self.last_id = self.db.scalar_int(
                         "SELECT COALESCE(MAX(`id`), 0) FROM `agent_playerbot_events`"
                     )
+            if skip_backlog_on_start:
+                max_id = self.db.scalar_int("SELECT COALESCE(MAX(`id`), 0) FROM `agent_playerbot_events`")
+                if max_id > self.last_id:
+                    self.skipped_backlog = self.db.scalar_int(
+                        "SELECT COUNT(*) FROM `agent_playerbot_events` "
+                        f"WHERE `id` > {int(self.last_id)} AND `id` <= {int(max_id)} "
+                        "AND `processed_at` IS NULL"
+                    )
+                    self.db.execute(
+                        "UPDATE `agent_playerbot_events` SET `processed_at` = NOW() "
+                        f"WHERE `id` > {int(self.last_id)} AND `id` <= {int(max_id)} "
+                        "AND `processed_at` IS NULL"
+                    )
+                    self.last_id = max_id
 
     def save(self) -> None:
         save_state(self.state_path, {"last_id": self.last_id})
 
     def poll_once(self) -> int:
-        events = fetch_events(self.db, after_id=self.last_id, limit=self.poll_limit)
+        events = fetch_events(self.db, after_id=self.last_id, limit=self.poll_limit, unprocessed_only=True)
         for event in events:
             self.handle_event(event)
             self.last_id = max(self.last_id, int(event["id"]))
@@ -934,7 +950,10 @@ def main() -> int:
         Path(args.state),
         replay=bool(args.replay),
         poll_limit=env_int("PLAYERBOT_HERMES_POLL_LIMIT", 10, 1),
+        skip_backlog_on_start=env_bool("PLAYERBOT_HERMES_SKIP_BACKLOG_ON_START", False),
     )
+    if relay.skipped_backlog:
+        log_event("startup_backlog_skipped", skipped_count=relay.skipped_backlog, last_id=relay.last_id)
     log_event(
         "startup",
         last_id=relay.last_id,

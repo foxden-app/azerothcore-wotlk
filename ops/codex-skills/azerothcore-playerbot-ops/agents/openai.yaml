@@ -1,4 +1,4 @@
 interface:
   display_name: "AzerothCore PlayerBot Ops"
-  short_description: "Operate, build, deploy, and document the AzerothCore playerbot stack"
-  default_prompt: "Start, stop, restart, inspect logs, verify ports, compile/deploy worldserver with prefix checks, and keep the Playerbot/Hermes architecture docs current."
+  short_description: "Operate, debug, build, deploy, document, commit, and push the RT PlayerBot stack"
+  default_prompt: "Check RT production status, troubleshoot 瓦小狸/MCP/Hermes relay issues, deploy sidecars or world binaries safely, update architecture truth docs, and commit with a Chinese message before pushing."

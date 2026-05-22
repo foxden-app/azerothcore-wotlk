@@ -1,0 +1,22 @@
+[Unit]
+Description=AzerothCore Lightweight Account Registration on RT
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wuya
+Group=wuya
+WorkingDirectory=/home/wuya/git/azerothcore-wotlk-git
+EnvironmentFile=/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/account-register.env
+ExecStartPre=/usr/bin/mkdir -p /home/wuya/git/azerothcore-wotlk-git/env/dist/logs
+ExecStart=/usr/bin/python3 /home/wuya/git/azerothcore-wotlk-git/tools/account-register/server.py
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+StandardOutput=append:/home/wuya/git/azerothcore-wotlk-git/env/dist/logs/account-register.log
+StandardError=append:/home/wuya/git/azerothcore-wotlk-git/env/dist/logs/account-register.log
+
+[Install]
+WantedBy=multi-user.target

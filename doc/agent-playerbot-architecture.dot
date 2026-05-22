@@ -8,7 +8,7 @@ digraph AgentPlayerbotArchitecture {
     fontname="Noto Sans CJK SC",
     fontsize=18,
     labelloc=t,
-    label="WoW PlayerBot Agent 当前架构（2026-05-20）"
+    label="WoW PlayerBot Agent 当前架构（2026-05-22，RT 生产）"
   ];
 
   node [
@@ -41,18 +41,19 @@ digraph AgentPlayerbotArchitecture {
     randombots [label="随机世界 bot\n只允许闲聊回复\n不允许 Agent 控制动作", fillcolor="#F1F5F9"];
   }
 
-  subgraph cluster_t490 {
-    label="T490：AzerothCore + 本地基础设施";
+  subgraph cluster_game_rt {
+    label="RT：AzerothCore 容器 + 本机侧车";
     color="#CBD5E1";
     style="rounded";
 
-    auth [label="authserver\n0.0.0.0:3724"];
-    world [label="worldserver\n0.0.0.0:8085\nSOAP 7879", fillcolor="#EFF6FF"];
+    auth [label="wow-auth 容器\nauthserver\n0.0.0.0:3724"];
+    world [label="wow-world 容器\nworldserver\n0.0.0.0:8085\nSOAP 7879", fillcolor="#EFF6FF"];
     modpb [label="mod-playerbots\n高频小脑/本能\n治疗、坦克、DPS、跟随、拾取"];
     bridge [label="mod-playerbot-agent\nC++ 薄桥\n采集上下文 / 执行动作\n回复分片，不硬截断", fillcolor="#EFF6FF"];
-    mcp [label="wow_playerbot MCP 服务\nsystemd 平级服务\n0.0.0.0:18765", fillcolor="#F0FDF4"];
-    relay [label="Hermes relay\n读取事件，推送 RT Hermes\n写中文 JSONL 日志", fillcolor="#F0FDF4"];
-    legacy [label="旧 Python sidecar\n可回滚路径\n默认不做 LLM 决策", fillcolor="#F8FAFC", style="rounded,dashed,filled"];
+    mcp [label="wow_playerbot MCP 服务\nRT systemd\n0.0.0.0:18765", fillcolor="#F0FDF4"];
+    relay [label="Hermes relay\n读取未处理事件\n写中文 JSONL 日志\n启动跳过积压旧事件", fillcolor="#F0FDF4"];
+    register [label="账号注册页\nRT systemd\n127.0.0.1:18080", fillcolor="#F0FDF4"];
+    legacy [label="旧 Python sidecar\n本地/T490 回滚路径\n生产默认不用", fillcolor="#F8FAFC", style="rounded,dashed,filled"];
   }
 
   subgraph cluster_db {

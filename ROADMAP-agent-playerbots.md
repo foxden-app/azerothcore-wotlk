@@ -2,7 +2,7 @@
 
 最后核对：2026-05-21
 
-本文件记录 `playerbot-agent` 分支后续怎么把 Playerbots 的职业本能暴露给上层 Agent。架构和部署真相源仍然是 [ARCHITECTURE-agent-playerbots.md](/home/wuya/git/azerothcore-wotlk-git/ARCHITECTURE-agent-playerbots.md)。
+本文件记录 `playerbot-agent` 分支后续怎么把 Playerbots 的职业本能暴露给上层 Agent。架构和部署真相源仍然是 [ARCHITECTURE-agent-playerbots.md](ARCHITECTURE-agent-playerbots.md)。
 
 本文档回答三个问题：
 

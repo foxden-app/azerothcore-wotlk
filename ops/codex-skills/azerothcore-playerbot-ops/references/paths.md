@@ -1,37 +1,69 @@
 # AzerothCore PlayerBot Paths
 
-- New repo: `/home/wuya/git/azerothcore-wotlk-git`
-- Build dir: `/home/wuya/git/azerothcore-wotlk-git/var/build-agent-release`
-- Expected CMake install prefix: `/home/wuya/git/azerothcore-wotlk-git/env/dist`
-- Built worldserver: `/home/wuya/git/azerothcore-wotlk-git/var/build-agent-release/src/server/apps/worldserver`
-- Runtime worldserver: `/home/wuya/git/azerothcore-wotlk-git/env/dist/bin/worldserver`
-- Old runtime quarantine: `/home/wuya/git/azerothcore-wotlk.disabled-20260516`
-- Auth config: `/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/authserver.conf`
-- World config: `/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/worldserver.conf`
-- Playerbot config: `/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/modules/playerbots.conf`
-- Playerbot agent config: `/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/modules/playerbot_agent.conf`
-- MCP env: `/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/playerbot-mcp.env`
-- Hermes relay env: `/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/playerbot-hermes-relay.env`
-- Runtime data directories under bin: `dbc`, `maps`, `vmaps`, `mmaps`, `Cameras`
-- Systemd templates: `/home/wuya/git/azerothcore-wotlk-git/ops/systemd`
-- Architecture truth source: `/home/wuya/git/azerothcore-wotlk-git/ARCHITECTURE-agent-playerbots.md`
-- Roadmap: `/home/wuya/git/azerothcore-wotlk-git/ROADMAP-agent-playerbots.md`
-- Runtime runbook: `/home/wuya/git/azerothcore-wotlk-git/README-playerbot-agent-runtime.md`
-- Architecture diagram: `/home/wuya/git/azerothcore-wotlk-git/doc/agent-playerbot-architecture.{dot,svg,png}`
+## Development Machine
 
-Expected DB targets in `worldserver.conf`:
+- Current dev checkout: `/home/wuya/git_wsl/azerothcore-wotlk`
+- Repo skill source: `ops/codex-skills/azerothcore-playerbot-ops`
+- Installed Codex skill target: `${CODEX_HOME:-/mnt/c/Users/chuan/.codex}/skills/azerothcore-playerbot-ops`
+- RT deploy script: `ops/rt-wow-migration/deploy.sh`
+- RT deploy runbook: `ops/rt-wow-migration/README.md`
+
+Build artifacts may be absent on a new dev machine. Verify before C++ deploy:
+
+- CMake cache: `var/build-agent-release/CMakeCache.txt` or another known build dir
+- Runtime binaries: `env/dist/bin/authserver`, `env/dist/bin/worldserver`
+- Expected install prefix when using `var/build-agent-release`: `env/dist`
+
+## RT Production
+
+- SSH: `ssh -p 8022 wuya@38.207.189.99`
+- LAN address: `192.168.1.179`
+- RT runtime root: `/home/wuya/git/azerothcore-wotlk-git`
+- RT compose path: `/home/wuya/git/azerothcore-wotlk-git/ops/rt-wow-migration`
+- Runtime files: `/home/wuya/git/azerothcore-wotlk-git/env/dist`
+- Configs: `/home/wuya/git/azerothcore-wotlk-git/env/dist/etc`
+- Logs: `/home/wuya/git/azerothcore-wotlk-git/env/dist/logs`
+- Runtime image libs: `/home/wuya/git/azerothcore-wotlk-git/ops/rt-wow-migration/libs` (ignored by git)
+
+RT containers:
+
+- `wow-auth`: authserver, host network, port `3724`
+- `wow-world`: worldserver, host network, ports `8085` and SOAP `7879`
+- `hermes-wow`: Hermes API, port `8642`
+
+RT systemd sidecars:
+
+- `azerothcore-playerbot-mcp.service`: MCP, port `18765`
+- `azerothcore-playerbot-hermes-relay.service`: event relay
+- `azerothcore-account-register.service`: registration page, `127.0.0.1:18080`
+
+RT databases:
 
 - Login DB: `acore_auth`
 - World DB: `acore_playerbot_world`
 - Character DB: `acore_playerbot_characters`
+- Playerbots DB: `acore_playerbots`
 
-Expected realm:
+Realms:
 
-- `Agent PlayerBot` at `38.207.189.99:8085`
+- `id=1`, `线路一`, `38.207.189.99:8085`
+- `id=2`, `线路二`, `8.162.5.68:8085`
+- `RealmList.RealmIDAliases = "2:1"`
+- Both realms use `flag=0`, `timezone=16`, `localSubnetMask=255.255.255.255`, build `12340`
 
-Expected public FRP proxies:
+RT production config facts:
 
-- `azerothcore-auth-3724`
-- `azerothcore-world-8085`
+- `RealmID = 1`
+- `RealmZone = 16`
+- `Console.Enable = 0`
+- `Updates.EnableDatabases = 0`
+- `MySQLExecutable = "/usr/bin/true"`
+- `SourceDirectory = "/home/wuya/git/azerothcore-wotlk-git"`
+- `AiPlayerbot.RandomBotAutologin = 0`
+- `AiPlayerbot.MinRandomBots = 0`
+- `AiPlayerbot.MaxRandomBots = 0`
+- `AiPlayerbot.AddClassAccountPoolSize = 10`
+- `AgentPlayerbot.AnchorBotAutologin = 1`
+- `AgentPlayerbot.AnchorBotName = "瓦小狸"`
 
-Legacy agent proxies `3725/8086` should stay disabled unless a separate hidden realm is intentionally restored.
+Do not expose RT MySQL to the public internet. Do not commit RT env files, GM password files, DB dumps, logs, or runtime `libs/`.

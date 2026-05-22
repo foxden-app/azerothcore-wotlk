@@ -1,0 +1,76 @@
+services:
+  wow-auth:
+    build:
+      context: .
+      dockerfile: Dockerfile.runtime
+    container_name: wow-auth
+    init: true
+    network_mode: host
+    restart: unless-stopped
+    working_dir: /home/wuya/git/azerothcore-wotlk-git/env/dist/bin
+    volumes:
+      - /home/wuya/git/azerothcore-wotlk-git:/home/wuya/git/azerothcore-wotlk-git
+    command:
+      - /home/wuya/git/azerothcore-wotlk-git/env/dist/bin/authserver
+      - --config
+      - /home/wuya/git/azerothcore-wotlk-git/env/dist/etc/authserver.conf
+
+  wow-world:
+    build:
+      context: .
+      dockerfile: Dockerfile.runtime
+    container_name: wow-world
+    init: true
+    network_mode: host
+    restart: unless-stopped
+    working_dir: /home/wuya/git/azerothcore-wotlk-git/env/dist/bin
+    volumes:
+      - /home/wuya/git/azerothcore-wotlk-git:/home/wuya/git/azerothcore-wotlk-git
+    depends_on:
+      - wow-auth
+    command:
+      - /home/wuya/git/azerothcore-wotlk-git/env/dist/bin/worldserver
+      - --config
+      - /home/wuya/git/azerothcore-wotlk-git/env/dist/etc/worldserver.conf
+
+  wow-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.runtime
+    container_name: wow-mcp
+    profiles:
+      - sidecar
+    init: true
+    network_mode: host
+    restart: unless-stopped
+    working_dir: /home/wuya/git/azerothcore-wotlk-git
+    volumes:
+      - /home/wuya/git/azerothcore-wotlk-git:/home/wuya/git/azerothcore-wotlk-git
+    env_file:
+      - /home/wuya/git/azerothcore-wotlk-git/env/dist/etc/playerbot-mcp.env
+    depends_on:
+      - wow-world
+    command:
+      - /home/wuya/git/azerothcore-wotlk-git/var/playerbot-mcp-venv/bin/python
+      - /home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/server.py
+
+  wow-hermes-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.runtime
+    container_name: wow-hermes-relay
+    profiles:
+      - sidecar
+    init: true
+    network_mode: host
+    restart: unless-stopped
+    working_dir: /home/wuya/git/azerothcore-wotlk-git
+    volumes:
+      - /home/wuya/git/azerothcore-wotlk-git:/home/wuya/git/azerothcore-wotlk-git
+    env_file:
+      - /home/wuya/git/azerothcore-wotlk-git/env/dist/etc/playerbot-hermes-relay.env
+    depends_on:
+      - wow-mcp
+    command:
+      - /home/wuya/git/azerothcore-wotlk-git/var/playerbot-mcp-venv/bin/python
+      - /home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/hermes_relay.py

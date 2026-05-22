@@ -7,7 +7,14 @@ MCP_SERVICE=azerothcore-playerbot-mcp.service
 HERMES_RELAY_SERVICE=azerothcore-playerbot-hermes-relay.service
 ACCOUNT_REGISTER_SERVICE=azerothcore-account-register.service
 FRPC_SERVICE=frpc.service
-REPO=/home/wuya/git/azerothcore-wotlk-git
+if git_root=$(git rev-parse --show-toplevel 2>/dev/null); then
+  DEFAULT_REPO=$git_root
+elif [[ -d /home/wuya/git_wsl/azerothcore-wotlk ]]; then
+  DEFAULT_REPO=/home/wuya/git_wsl/azerothcore-wotlk
+else
+  DEFAULT_REPO=/home/wuya/git/azerothcore-wotlk-git
+fi
+REPO=${ACORE_REPO:-$DEFAULT_REPO}
 BUILD_DIR=$REPO/var/build-agent-release
 EXPECTED_PREFIX=$REPO/env/dist
 BUILT_WORLDSERVER=$BUILD_DIR/src/server/apps/worldserver
@@ -29,6 +36,10 @@ Commands:
   restart            Restart auth/world using the safe order.
   restart-sidecars   Restart MCP, Hermes relay, and account register.
   status             Show service status, ports, and processes.
+  rt-status          Show RT production containers, sidecars, ports, and realmlist.
+  rt-deploy-sidecar  Sync Python sidecars to RT and restart RT sidecar services.
+  rt-deploy-world    Backup RT DB, sync auth/world runtime, rebuild image, restart auth/world.
+  rt-backup-db       Create a timestamped RT production DB backup.
   check              Compact health check.
   check-all          Compact health check for auth/world/MCP/relay/register.
   ready              Search current worldserver startup markers in journal.
@@ -45,6 +56,16 @@ Commands:
   old-refs           Check references to the old non-git runtime path.
   quarantine-old     Rename the old runtime path if it still exists.
 USAGE
+}
+
+rt_deploy() {
+  local command=$1
+  local script="$REPO/ops/rt-wow-migration/deploy.sh"
+  if [[ ! -x "$script" ]]; then
+    echo "Missing executable RT deploy script: $script" >&2
+    exit 1
+  fi
+  (cd "$REPO" && "$script" "$command")
 }
 
 ports() {
@@ -265,9 +286,25 @@ case "$cmd" in
     "$0" check-all
     ;;
   status)
-    systemctl --no-pager --full status "$AUTH_SERVICE" "$WORLD_SERVICE" "$MCP_SERVICE" "$HERMES_RELAY_SERVICE" "$ACCOUNT_REGISTER_SERVICE" "$FRPC_SERVICE" || true
-    ports
-    processes
+    if [[ "${ACORE_OPS_DEFAULT:-rt}" == "rt" && -x "$REPO/ops/rt-wow-migration/deploy.sh" ]]; then
+      rt_deploy status
+    else
+      systemctl --no-pager --full status "$AUTH_SERVICE" "$WORLD_SERVICE" "$MCP_SERVICE" "$HERMES_RELAY_SERVICE" "$ACCOUNT_REGISTER_SERVICE" "$FRPC_SERVICE" || true
+      ports
+      processes
+    fi
+    ;;
+  rt-status)
+    rt_deploy status
+    ;;
+  rt-deploy-sidecar)
+    rt_deploy deploy-sidecar
+    ;;
+  rt-deploy-world)
+    rt_deploy deploy-world
+    ;;
+  rt-backup-db)
+    rt_deploy backup-db
     ;;
   check)
     systemctl is-active "$AUTH_SERVICE" "$WORLD_SERVICE" "$FRPC_SERVICE"
