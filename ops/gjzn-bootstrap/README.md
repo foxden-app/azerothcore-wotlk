@@ -82,10 +82,18 @@ HTTPS_PROXY=http://127.0.0.1:20171
 NO_PROXY=localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
 ```
 
+GJZN 的 `wuya` 用户也已配置 git 走同一个 HTTP 代理，否则直接 `git fetch` GitHub 会超时：
+
+```bash
+git config --global http.proxy http://127.0.0.1:20171
+git config --global https.proxy http://127.0.0.1:20171
+```
+
 已验证：
 
 ```bash
 ssh GJZN 'curl -fsS -x http://127.0.0.1:20171 https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name'
+ssh GJZN 'git -C /home/wuya/git/azerothcore-wotlk-git fetch foxden-app playerbot-agent'
 ssh GJZN 'docker pull hello-world'
 ssh GJZN 'docker run --rm hello-world'
 ```
