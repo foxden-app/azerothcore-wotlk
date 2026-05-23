@@ -746,12 +746,18 @@ class Relay:
 
         action_ids: list[int] = []
         for name in targets:
+            command_line = f"add {name}"
             enqueue_result = enqueue_action(
                 self.db,
                 event=event,
                 action_type="playerbot_command",
-                command=f"add {name}",
-                payload={"fast_path": True, "reason": "restore_offline_group_bot", "bot": name},
+                command=command_line,
+                payload={
+                    "fast_path": True,
+                    "reason": "restore_offline_group_bot",
+                    "bot": name,
+                    "command_line": command_line,
+                },
             )
             if enqueue_result.get("action_id"):
                 action_ids.append(int(enqueue_result["action_id"]))

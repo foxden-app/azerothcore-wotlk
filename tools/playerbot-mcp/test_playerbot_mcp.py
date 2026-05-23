@@ -615,6 +615,47 @@ class CommonTests(unittest.TestCase):
         self.assertTrue(hermes_relay.parse_team_online_request("让小队的人上线"))
         self.assertEqual(hermes_relay.offline_group_bot_names(event), ["中年狼", "乌鸦"])
 
+    def test_relay_team_online_fast_path_payload_contains_command_line(self):
+        class FakeDb:
+            def scalar_int(self, _sql):
+                return 0
+
+        event = {
+            "id": 99,
+            "channel": "party",
+            "message": "让小队的人上线",
+            "speaker_name": "Wuya",
+            "context": {
+                "group_members": [
+                    {"name": "Wuya", "online": True, "is_bot": False},
+                    {"name": "中年狼", "online": False, "offline_in_group": True, "is_bot": True},
+                ]
+            },
+        }
+        calls = []
+
+        def fake_enqueue_action(_db, **kwargs):
+            calls.append(kwargs)
+            return {"action_id": len(calls)}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            relay = hermes_relay.Relay(FakeDb(), client=object(), state_path=pathlib.Path(tmp) / "state.json")
+            with (
+                patch("hermes_relay.enqueue_action", side_effect=fake_enqueue_action),
+                patch.object(
+                    relay,
+                    "wait_for_action_results",
+                    return_value=[{"action_type": "playerbot_command", "command": "add 中年狼", "status": "done"}],
+                ),
+                patch.object(relay, "enqueue_visible_reply"),
+            ):
+                self.assertTrue(relay.try_handle_team_online_request(event))
+
+        playerbot_commands = [call for call in calls if call.get("action_type") == "playerbot_command"]
+        self.assertEqual(len(playerbot_commands), 1)
+        self.assertEqual(playerbot_commands[0]["command"], "add 中年狼")
+        self.assertEqual(playerbot_commands[0]["payload"]["command_line"], "add 中年狼")
+
     def test_relay_selects_mage_from_target_or_group_context(self):
         event = {
             "context": {
