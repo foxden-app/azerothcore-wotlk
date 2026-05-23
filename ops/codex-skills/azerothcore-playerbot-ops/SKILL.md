@@ -19,6 +19,14 @@ Production shape:
 - Auth alias: `RealmList.RealmIDAliases = "2:1"`; both realms point to the same worldserver.
 - RT production DBs: `acore_auth`, `acore_playerbot_world`, `acore_playerbot_characters`, `acore_playerbots`.
 
+GJZN is a new i7 development/build and standby candidate, not current production while it only has 4GB RAM:
+
+- GJZN SSH: `ssh GJZN` / `wuya@192.168.1.248`.
+- GJZN repo root: `/home/wuya/git/azerothcore-wotlk-git`.
+- GJZN runbook: `ops/gjzn-bootstrap/README.md`.
+- It has Ubuntu 24.04, Docker, Xray proxy, build deps, 16GB swap, no GUI target, and boot-enabled `ssh/docker/xray`.
+- Do not move RT production WoW to GJZN until memory is fixed to at least 8GB; 16GB is preferred.
+
 Primary ops entrypoint from the repo root:
 
 ```bash

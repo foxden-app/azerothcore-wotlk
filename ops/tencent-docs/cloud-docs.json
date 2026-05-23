@@ -37,6 +37,17 @@
       }
     },
     {
+      "key": "gjzn-runbook",
+      "title": "GJZN-bootstrap-runbook",
+      "source": "ops/gjzn-bootstrap/README.md",
+      "file_id": "dZLargcZOMxQ",
+      "url": "https://docs.qq.com/doc/DZFpMYXJnY1pPTXhR",
+      "sync": {
+        "mode": "doc_from_markdown"
+      },
+      "last_synced_at": "2026-05-23T20:28:20+08:00"
+    },
+    {
       "key": "agent-readme",
       "title": "README-agent-playerbots",
       "source": "README-agent-playerbots.md",
