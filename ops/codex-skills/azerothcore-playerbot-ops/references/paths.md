@@ -23,7 +23,7 @@ Tencent Docs:
 - Folder: `AzerothCore PlayerBot RT 文档`
 - Folder URL: `https://docs.qq.com/desktop/mydoc/folder/dCqgFyBeqUwT`
 - Architecture doc: `https://docs.qq.com/doc/DZFVEZWVnU0hyb1ZS`
-- Runtime README: `https://docs.qq.com/doc/DZFlaZE10TXpWQm9Y`
+- Runtime README: `https://docs.qq.com/doc/DZFZTVkhMYXhtY2tS`
 - RT runbook: `https://docs.qq.com/doc/DZEpTcUdvWWtiVWtE`
 - GJZN runbook: `https://docs.qq.com/doc/DZFFKWFpMa2pVeHpT`
 - Agent README: `https://docs.qq.com/markdown/DZERueEhFekd1aFR2`

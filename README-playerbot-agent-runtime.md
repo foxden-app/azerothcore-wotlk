@@ -326,6 +326,8 @@ ssh -p 8022 wuya@38.207.189.99 'docker logs -f hermes-wow'
 
 `PLAYERBOT_HERMES_CONVERSATION_EPOCH` 用来主动切换 Hermes 会话命名空间。迁服、工具配置变化或旧会话上下文过大时，改一个新值即可让后续消息进入新会话，避开旧 event_id 和长历史。
 
+游戏内也可以触发切换：对瓦小狸说“新建会话”“重置上下文”“清空上下文”“压缩上下文”等，relay 会直接更新当前 WoW conversation 的 epoch 并回复确认，不进入 Hermes。当前“压缩上下文”按“切到新会话”处理；真正摘要压缩需要 Hermes 提供可验证的摘要写回能力后再接。
+
 `PLAYERBOT_HERMES_TRACE_RAW=1` 时，relay 日志会记录发给 Hermes 的完整事件包、最近动作结果、Hermes 响应文本和原始响应。生产默认关闭，避免日志膨胀和重复保存大事件包。API key 和 MCP bearer token 只放在 GJZN 的私有 env/config 文件里，不要提交到 git。
 
 relay 对纯问候、在不在、感谢、提供法师吃喝、叫回离线队友等高频简单意图有确定性 fast-path。这些事件直接写 `agent_playerbot_actions`，不进入 Hermes，避免无谓 token 消耗。

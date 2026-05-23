@@ -74,6 +74,28 @@ TEAM_ONLINE_RE = re.compile(
     r"(?:队友|队伍|小队|队里|组里|他们|大家|灰名|离线).{0,12}(?:上线|上来|回来|叫回|叫回来|拉回|拉回来|归队)"
     r"|(?:上线|上来|回来|叫回|叫回来|拉回|拉回来|归队).{0,12}(?:队友|队伍|小队|队里|组里|他们|大家|灰名|离线)"
 )
+CONTEXT_RESET_PHRASES = (
+    "新建会话",
+    "新开会话",
+    "开新会话",
+    "另开会话",
+    "重开会话",
+    "重置会话",
+    "重置上下文",
+    "清空上下文",
+    "清理上下文",
+    "刷新上下文",
+    "忘掉上下文",
+    "忘记上下文",
+    "切新会话",
+    "切换会话",
+)
+CONTEXT_COMPRESS_PHRASES = (
+    "压缩上下文",
+    "压缩会话",
+    "总结上下文",
+    "整理上下文",
+)
 SOCIAL_PUNCT_RE = re.compile(r"[，。！？!?,.～~、：:；;]+")
 GREETING_MESSAGES = {
     "hi",
@@ -237,20 +259,27 @@ def response_text(value: Any) -> str:
     return ""
 
 
-def conversation_for(event: dict[str, Any]) -> str:
+def default_conversation_epoch() -> str:
+    return os.getenv("PLAYERBOT_HERMES_CONVERSATION_EPOCH", "").strip()
+
+
+def base_conversation_for(event: dict[str, Any]) -> str:
     channel = str(event.get("channel") or "")
     speaker_guid = int(event.get("speaker_guid") or 0)
     bot_guid = int(event.get("bot_guid") or 0)
     leader_guid = int(event.get("group_leader_guid") or 0)
 
     if channel == "whisper" and bot_guid:
-        base = f"wow-whisper-{speaker_guid}-{bot_guid}"
-    elif leader_guid:
-        base = f"wow-party-{leader_guid}"
-    else:
-        base = f"wow-player-{speaker_guid}"
+        return f"wow-whisper-{speaker_guid}-{bot_guid}"
+    if leader_guid:
+        return f"wow-party-{leader_guid}"
+    return f"wow-player-{speaker_guid}"
 
-    epoch = os.getenv("PLAYERBOT_HERMES_CONVERSATION_EPOCH", "").strip()
+
+def conversation_for(event: dict[str, Any], epoch: str | None = None) -> str:
+    base = base_conversation_for(event)
+    if epoch is None:
+        epoch = default_conversation_epoch()
     if epoch:
         return f"{base}-{epoch}"
     return base
@@ -347,6 +376,22 @@ def simple_social_reply_text(message: str) -> str | None:
     if text in THANKS_MESSAGES:
         return "不客气。"
     return None
+
+
+def context_control_request(message: str) -> str:
+    text = SOCIAL_PUNCT_RE.sub("", compact_message(message))
+    if not text:
+        return ""
+    for alias in sorted((alias.lower() for alias in anchor_bot_aliases()), key=len, reverse=True):
+        text = text.replace(alias, "")
+    if any(phrase in text for phrase in CONTEXT_COMPRESS_PHRASES) or re.search(r"(压缩|总结|整理).{0,4}(上下文|会话|对话|记忆)", text):
+        return "compress"
+    if any(phrase in text for phrase in CONTEXT_RESET_PHRASES) or re.search(
+        r"(新建|新开|另开|重开|重置|清空|清理|刷新|忘掉|忘记|切|切换).{0,4}(会话|上下文|对话|记忆)",
+        text,
+    ):
+        return "reset"
+    return ""
 
 
 def parse_stack_count(text: str) -> int:
@@ -633,11 +678,18 @@ class Relay:
         self.state_path = state_path
         self.poll_limit = poll_limit
         self.skipped_backlog = 0
+        state: dict[str, Any] = load_state(state_path) if state_path.exists() else {}
+        raw_epochs = state.get("conversation_epochs", {})
+        self.conversation_epochs: dict[str, str] = {
+            str(key): str(value)
+            for key, value in raw_epochs.items()
+            if str(key).strip() and str(value).strip()
+        } if isinstance(raw_epochs, dict) else {}
         if replay:
             self.last_id = 0
         else:
             if state_path.exists():
-                self.last_id = load_state(state_path)["last_id"]
+                self.last_id = int(state.get("last_id") or 0)
             else:
                 self.last_id = self.db.scalar_int(
                     "SELECT COALESCE(MAX(`id`), 0) FROM `agent_playerbot_events` "
@@ -663,7 +715,25 @@ class Relay:
                     self.last_id = max_id
 
     def save(self) -> None:
-        save_state(self.state_path, {"last_id": self.last_id})
+        save_state(
+            self.state_path,
+            {
+                "last_id": self.last_id,
+                "conversation_epochs": self.conversation_epochs,
+            },
+        )
+
+    def conversation_for_event(self, event: dict[str, Any]) -> str:
+        base = base_conversation_for(event)
+        return conversation_for(event, self.conversation_epochs.get(base) or default_conversation_epoch())
+
+    def rotate_conversation_epoch(self, event: dict[str, Any]) -> tuple[str, str]:
+        base = base_conversation_for(event)
+        prefix = default_conversation_epoch() or "wow"
+        epoch = f"{prefix}-event{int(event['id'])}"
+        self.conversation_epochs[base] = epoch
+        self.save()
+        return base, conversation_for(event, epoch)
 
     def poll_once(self) -> int:
         events = fetch_events(self.db, after_id=self.last_id, limit=self.poll_limit, unprocessed_only=True)
@@ -678,7 +748,7 @@ class Relay:
         return len(events)
 
     def handle_event(self, event: dict[str, Any]) -> None:
-        conversation = conversation_for(event)
+        conversation = self.conversation_for_event(event)
         action_results = fetch_action_results(self.db, int(event["id"]), limit=8)
         skip, skip_reason = should_skip_event(event)
         if skip:
@@ -692,6 +762,8 @@ class Relay:
                 reason=skip_reason,
                 anchor_aliases=anchor_bot_aliases(),
             )
+            return
+        if self.try_handle_context_control(event):
             return
         if self.try_handle_simple_social_message(event):
             return
@@ -710,6 +782,30 @@ class Relay:
         self.client.send_event(conversation=conversation, event=event, action_results=action_results)
         settled_results = self.wait_for_action_results(int(event["id"]))
         self.ensure_visible_reply(event, settled_results)
+
+    def try_handle_context_control(self, event: dict[str, Any]) -> bool:
+        mode = context_control_request(str(event.get("message") or ""))
+        if not mode:
+            return False
+        channel = str(event.get("channel") or "party").strip().lower()
+        if channel not in REPLY_CHANNELS:
+            channel = "party"
+        base, conversation = self.rotate_conversation_epoch(event)
+        reply = "已切到新会话，后续消息不会再带旧上下文。"
+        if mode == "compress":
+            reply = "我先切到新会话来替代压缩，旧上下文不会继续带入。"
+        log_event(
+            "fast_context_reset",
+            event_id=event["id"],
+            base_conversation=base,
+            conversation=conversation,
+            channel=channel,
+            speaker=event.get("speaker_name"),
+            message=event.get("message"),
+            mode=mode,
+        )
+        self.enqueue_visible_reply(event, reply, channel=channel, reason="fast_context_reset")
+        return True
 
     def try_handle_simple_social_message(self, event: dict[str, Any]) -> bool:
         reply = simple_social_reply_text(str(event.get("message") or ""))

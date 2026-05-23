@@ -237,6 +237,48 @@ class CommonTests(unittest.TestCase):
         self.assertEqual(hermes_relay.simple_social_reply_text("瓦小狸谢谢"), "不客气。")
         self.assertIsNone(hermes_relay.simple_social_reply_text("晚上好，帮我叫队友上线"))
 
+    def test_context_control_request(self):
+        self.assertEqual(hermes_relay.context_control_request("瓦小狸，新建会话"), "reset")
+        self.assertEqual(hermes_relay.context_control_request("小狸，压缩上下文"), "compress")
+        self.assertEqual(hermes_relay.context_control_request("帮我新建一个会话"), "reset")
+        self.assertEqual(hermes_relay.context_control_request("压缩一下对话记忆"), "compress")
+        self.assertEqual(hermes_relay.context_control_request("清空上下文"), "reset")
+        self.assertEqual(hermes_relay.context_control_request("帮我叫队友上线"), "")
+
+    def test_context_control_rotates_conversation_epoch(self):
+        class FakeDb:
+            def scalar_int(self, sql):
+                return 0
+
+        event = {
+            "id": 77,
+            "channel": "whisper",
+            "speaker_guid": 10,
+            "speaker_name": "Wuya",
+            "bot_guid": 20,
+            "bot_name": "瓦小狸",
+            "group_leader_guid": 99,
+            "message": "瓦小狸，新建会话",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            relay = hermes_relay.Relay(FakeDb(), object(), pathlib.Path(tmp) / "state.json")
+            with (
+                patch.dict("os.environ", {"PLAYERBOT_HERMES_CONVERSATION_EPOCH": "gjzn-20260523"}),
+                patch("hermes_relay.enqueue_action", return_value={"action_id": 7, "deduped": False}),
+                patch("hermes_relay.log_event"),
+            ):
+                self.assertTrue(relay.try_handle_context_control(event))
+
+            self.assertEqual(
+                relay.conversation_epochs["wow-whisper-10-20"],
+                "gjzn-20260523-event77",
+            )
+            self.assertEqual(
+                hermes_relay.conversation_for(event, relay.conversation_epochs["wow-whisper-10-20"]),
+                "wow-whisper-10-20-gjzn-20260523-event77",
+            )
+
     def test_clean_playerbot_command_strips_prefix(self):
         self.assertEqual(server.clean_playerbot_command_line(".playerbots bot remove Gessa"), "remove Gessa")
         self.assertEqual(server.clean_playerbot_command_line(".bot list"), "list")
