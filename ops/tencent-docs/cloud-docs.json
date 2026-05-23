@@ -9,43 +9,46 @@
       "key": "architecture",
       "title": "ARCHITECTURE-agent-playerbots 云端版",
       "source": "ARCHITECTURE-agent-playerbots.md",
-      "file_id": "dpCqUCXNLkQw",
-      "url": "https://docs.qq.com/aio/DZHBDcVVDWE5Ma1F3",
+      "file_id": "dUDeegSHroVR",
+      "url": "https://docs.qq.com/doc/DZFVEZWVnU0hyb1ZS",
       "sync": {
         "mode": "manual_image_doc",
-        "reason": "包含本地架构图，需要先 upload_image 并替换为 image_id。"
-      }
+        "reason": "包含本地架构图，已上传图片并替换为 image_id。"
+      },
+      "last_synced_at": "2026-05-23T23:23:48+08:00"
     },
     {
       "key": "runtime-readme",
       "title": "README-playerbot-agent-runtime",
       "source": "README-playerbot-agent-runtime.md",
-      "file_id": "dvZTTghZmeWr",
-      "url": "https://docs.qq.com/doc/DZHZaVFRnaFptZVdy",
+      "file_id": "dOIWrdElogBm",
+      "url": "https://docs.qq.com/doc/DZE9JV3JkRWxvZ0Jt",
       "sync": {
         "mode": "doc_from_markdown"
-      }
+      },
+      "last_synced_at": "2026-05-23T23:20:26+08:00"
     },
     {
       "key": "rt-runbook",
       "title": "RT-runbook",
       "source": "ops/rt-wow-migration/README.md",
-      "file_id": "dOffeDNuLvKC",
-      "url": "https://docs.qq.com/doc/DZE9mZmVETnVMdktD",
+      "file_id": "dJSqGoYkbUkD",
+      "url": "https://docs.qq.com/doc/DZEpTcUdvWWtiVWtE",
       "sync": {
         "mode": "doc_from_markdown"
-      }
+      },
+      "last_synced_at": "2026-05-23T23:20:29+08:00"
     },
     {
       "key": "gjzn-runbook",
       "title": "GJZN-bootstrap-runbook",
       "source": "ops/gjzn-bootstrap/README.md",
-      "file_id": "dtyKBLyDBrrT",
-      "url": "https://docs.qq.com/doc/DZHR5S0JMeURCcnJU",
+      "file_id": "dQJXZLkjUxzS",
+      "url": "https://docs.qq.com/doc/DZFFKWFpMa2pVeHpT",
       "sync": {
         "mode": "doc_from_markdown"
       },
-      "last_synced_at": "2026-05-23T20:40:52+08:00"
+      "last_synced_at": "2026-05-23T23:20:32+08:00"
     },
     {
       "key": "agent-readme",

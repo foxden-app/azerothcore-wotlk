@@ -1,6 +1,6 @@
 # Agent PlayerBot 架构真相源
 
-最后核对：2026-05-22
+最后核对：2026-05-23
 
 本文件是当前 `playerbot-agent` 分支的架构真相源。部署拓扑、数据库归属、端口、模块边界、Agent 分层和关键设计变化，都以这里为准。
 
@@ -43,7 +43,7 @@ tools/playerbot-mcp/
 
 同日补齐离线队伍成员上下文：私聊瓦小狸时也带发言玩家自己的队伍，`group_members` 会输出队伍名单里的离线 slot；离线 bot 标记为 `group_offline`。relay 对“队友上线/小队回来/灰名叫回”有确定性 fast-path，直接执行 `add <BotName>`，不再让 Hermes 从空队伍快照里猜。
 
-2026-05-22 生产运行从 T490 迁到 RT。RT 同时运行 auth/world 容器、Hermes 容器、MCP、Hermes relay 和注册页；T490/当前开发机只负责写代码、测试、编译和部署，不再作为生产侧车。RT 的 relay 增加 `unprocessed_only` 轮询和 `PLAYERBOT_HERMES_SKIP_BACKLOG_ON_START=1` 积压跳过语义，避免迁移/重启后补跑玩家已经离线的旧事件。`TeamId:uint8` 旧事件 JSON 兼容修复保留在 MCP，同时 C++ 桥已改为输出数值 team。
+2026-05-22 生产运行从 T490 迁到 RT。2026-05-23 生产服继续从 RT 迁到 GJZN。GJZN 现在运行 auth/world 原生 systemd、Hermes 容器、MCP、Hermes relay、注册页和两条 FRP 游戏线路；RT 保留为旧生产/回滚来源。relay 增加 `unprocessed_only` 轮询和 `PLAYERBOT_HERMES_SKIP_BACKLOG_ON_START=1` 积压跳过语义，避免迁移/重启后补跑玩家已经离线的旧事件。`TeamId:uint8` 旧事件 JSON 兼容修复保留在 MCP，同时 C++ 桥已改为输出数值 team。
 
 核心分层：
 
@@ -67,7 +67,7 @@ AzerothCore 世界
   - 地图、角色、战斗、寻路、数据库、网络会话
 ```
 
-Hermes 模式下，`playerbot-agent` 旧侧车不再直接做 LLM 决策；RT 上的 `playerbot-hermes-relay` 将 `agent_playerbot_events` 推给 RT 上的 Hermes，Hermes 再通过 RT 本机 WoW MCP 工具写入 `agent_playerbot_actions`。旧侧车保留为可回滚实现，但生产不依赖 T490。
+Hermes 模式下，`playerbot-agent` 旧侧车不再直接做 LLM 决策；GJZN 上的 `playerbot-hermes-relay` 将 `agent_playerbot_events` 推给 GJZN 上的 Hermes，Hermes 再通过 GJZN 本机 WoW MCP 工具写入 `agent_playerbot_actions`。旧侧车保留为可回滚实现，但生产不依赖 T490 或 RT 侧车。
 
 大模型不应该每秒决定“按哪个技能”。这类高频行为属于 Playerbots 本能。大模型应该决定“现在需要一个治疗进队”“这句话是在叫我组人”“这波打完先休整”“这个副本需要坦克+治疗+3DPS”。
 
@@ -92,19 +92,21 @@ auth 库:    acore_auth
 公网入口:   38.207.189.99
 ```
 
-### RT PlayerBot Agent 生产服
+### GJZN PlayerBot Agent 生产服
 
 ```text
-RT 运行目录:     /home/wuya/git/azerothcore-wotlk-git
-RT compose:      ops/rt-wow-migration/docker-compose.yml
-进程管理:        Docker Compose + systemd
-auth 容器:       wow-auth，0.0.0.0:3724
-world 容器:      wow-world，0.0.0.0:8085
+GJZN 运行目录:   /home/wuya/git/azerothcore-wotlk-git
+Hermes compose:  /home/wuya/srv/hermes-wow/docker-compose.yml
+进程管理:        systemd + Docker
+auth systemd:    azerothcore-auth.service，0.0.0.0:3724
+world systemd:   azerothcore-world.service，0.0.0.0:8085
 SOAP:            0.0.0.0:7879
 Hermes 容器:     hermes-wow，0.0.0.0:8642
 MCP systemd:     azerothcore-playerbot-mcp.service，0.0.0.0:18765
 relay systemd:   azerothcore-playerbot-hermes-relay.service
 注册页 systemd:  azerothcore-account-register.service，127.0.0.1:18080
+FRP 线路一:      frpc-acore-main.service -> 38.207.189.99:3724/8085
+FRP 线路二:      frpc-chml-unicom.service -> 8.162.5.68:8085
 auth 库:         acore_auth
 world 库:        acore_playerbot_world
 角色库:          acore_playerbot_characters
@@ -124,11 +126,13 @@ id=2  线路二  8.162.5.68:8085
 authserver.conf: RealmList.RealmIDAliases = "2:1"
 ```
 
-两个线路都指向 RT 同一个 worldserver。`8085` 是 PlayerBot Agent 服；它复用 `acore_auth`，但使用独立 world/characters/playerbots 数据库，避免污染旧生产数据。
+两个线路都指向 GJZN 同一个 worldserver。`8085` 是 PlayerBot Agent 服；它复用 `acore_auth`，但使用独立 world/characters/playerbots 数据库，避免污染旧生产数据。
+
+RT 当前为旧生产/回滚来源：auth/world 容器、Hermes、MCP、relay、注册页均已停；RT 主 `frpc.service` 保留非游戏代理，游戏端口 3724/8085 已移除；最终迁移备份是 `/home/wuya/backups/acore/acore-gjzn-cutover-20260523-230612.sql.gz`。
 
 ## 当前运行策略
 
-RT 当前按“可控 AddClass 小队优先、随机世界 bot 关闭”的低负载模式运行。AddClass bot 是玩家/Agent 可调度的小队成员；随机世界 bot 能力保留但默认不开，用于后续压测或世界氛围测试。即使重新打开随机世界 bot，LLM 也只能让它们闲聊回复，不能控制移动、战斗、治疗或拾取。
+GJZN 当前按“可控 AddClass 小队优先、随机世界 bot 关闭”的低负载模式运行。AddClass bot 是玩家/Agent 可调度的小队成员；随机世界 bot 能力保留但默认不开，用于后续压测或世界氛围测试。即使重新打开随机世界 bot，LLM 也只能让它们闲聊回复，不能控制移动、战斗、治疗或拾取。
 
 关键配置：
 

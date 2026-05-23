@@ -2,21 +2,22 @@
 
 更新时间：2026-05-23
 
-GJZN（龟机智能）是新的 i7 机器，当前先按“开发构建机 / 热备候选机”初始化。它还不是正式生产服：当前只插上 4GB 内存，运行完整 WoW 生产栈会非常紧，等内存修复到至少 8GB 后再考虑承接 RT 的生产职责。
+GJZN（龟机智能）是新的 i7 机器。2026-05-23 已从 RT 接管 AzerothCore PlayerBot 生产服：auth/world 原生 systemd 运行，Hermes 用 Docker 容器，MCP/relay/注册页用 systemd，公网游戏入口通过 FRP 转发到 GJZN。
 
 ## 主机信息
 
 - SSH：`ssh GJZN`
-- 当前地址：`192.168.1.248`
+- LAN SSH：`ssh GJZN`，当前地址 `192.168.1.248`
+- 公网 SSH：`ssh GJZN-public`，`38.207.189.99:8026`
 - 用户：`wuya`
 - sudo：免密 sudo 已验证
 - Hostname：`GJZN`
 - 系统：Ubuntu 24.04 LTS
 - CPU：Intel i7-3770K，4 核 8 线程
 - 主板：ASUS P8Z77-V
-- 内存：当前 4GB DDR3，实际可用约 3.8GiB
+- 内存：8GB DDR3，实际可用约 7.7GiB
 - 交换分区：`/swap.img`，16GB
-- 根分区：约 110GB，总剩余约 78GB
+- 根分区：约 110GB，迁服后剩余约 60GB
 - 当前网络：WiFi `wlp6s0`，连接 `CMCC-AU2A`，已启用 autoconnect
 
 本地 SSH alias 记录在开发机的 `~/.ssh/config`：
@@ -31,6 +32,53 @@ Host GJZN
     ControlPath ~/.ssh/cm-%C
     ServerAliveInterval 30
     ServerAliveCountMax 3
+
+Host GJZN-public
+    HostName 38.207.189.99
+    Port 8026
+    User wuya
+    ControlMaster auto
+    ControlPersist 10m
+    ControlPath ~/.ssh/cm-%C
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+```
+
+## 当前生产服务
+
+生产运行目录：
+
+```text
+/home/wuya/git/azerothcore-wotlk-git
+```
+
+生产服务：
+
+- `azerothcore-auth.service`：authserver，`0.0.0.0:3724`
+- `azerothcore-world.service`：worldserver，`0.0.0.0:8085`，SOAP `0.0.0.0:7879`
+- `hermes-wow`：Docker 容器，Hermes API `0.0.0.0:8642`，dashboard `127.0.0.1:9119`
+- `azerothcore-playerbot-mcp.service`：MCP，`0.0.0.0:18765`
+- `azerothcore-playerbot-hermes-relay.service`：游戏事件转 Hermes
+- `azerothcore-account-register.service`：注册页，`127.0.0.1:18080`
+- `frpc-acore-main.service`：线路一公网 `38.207.189.99:3724/8085`
+- `frpc-chml-unicom.service`：线路二公网 `8.162.5.68:8085`，备用 auth `8.162.5.68:8724`
+- `frpc-gjzn.service`：GJZN 公网 SSH `38.207.189.99:8026`
+
+生产数据库在 GJZN 本机 MySQL：
+
+```text
+acore_auth
+acore_playerbot_world
+acore_playerbot_characters
+acore_playerbots
+```
+
+RT 已退为旧生产/回滚来源：RT auth/world、MCP、relay、注册页、Hermes 已停；RT 主 `frpc.service` 保留非游戏代理，游戏端口 3724/8085 已移除；RT 线路二 `frpc-chml-unicom.service` 已停。
+
+最终迁移备份在 RT：
+
+```text
+/home/wuya/backups/acore/acore-gjzn-cutover-20260523-230612.sql.gz
 ```
 
 ## 已完成的持久化配置
@@ -40,7 +88,7 @@ GJZN 已按无图形服务器方式配置：
 - 默认 target：`multi-user.target`
 - display manager：已停止/禁用；当前服务不存在或 inactive
 - 睡眠/休眠：`sleep.target`、`suspend.target`、`hibernate.target`、`hybrid-sleep.target` 已 mask
-- 开机自启：`ssh`、`docker`、`xray`
+- 开机自启：`ssh`、`docker`、`xray`、`mysql`、AzerothCore 生产服务、FRP 游戏服务
 - Docker：已安装并启用，`wuya` 已加入 `docker` 组
 - Docker Compose：`docker compose version` 可用
 - ccache：已设置 20GB 上限
@@ -138,13 +186,13 @@ libboost-all-dev libmysqlclient-dev mysql-client
 
 ## 内存限制
 
-当前 4GB 内存只适合做轻量开发、文档、脚本、sidecar 测试和低并发编译。
+当前 8GB 内存可以承接低负载生产栈，但余量不大。迁服后观测到 GJZN 大约 4.8GB 内存已用、约 2.9GB available，swap 有少量使用。
 
-不要在 4GB 状态下把完整 RT 生产栈直接迁到 GJZN：
+注意：
 
-- RT 上 `worldserver` 空载约 3GB 内存。
-- MySQL、Hermes、MCP、relay、注册页、Docker 本身还会继续吃内存。
-- 16GB swap 只能防止构建或临时任务 OOM，不等于运行内存。
+- `worldserver`、MySQL、Hermes、MCP、relay、注册页和 Docker 会一起吃内存。
+- 16GB swap 是保护网，不是运行内存。
+- 随机世界 bot 仍不建议大规模打开。
 
 C++ 编译建议先低并发：
 
@@ -152,7 +200,17 @@ C++ 编译建议先低并发：
 cmake --build var/build/obj --target authserver worldserver -j2
 ```
 
-内存修复到 8GB 后，可以重新评估是否让 GJZN 承接 RT 生产或热备。16GB 更适合长期构建和生产冗余。
+16GB 更适合长期构建和生产冗余；当前 8GB 先按低负载生产运行。
+
+## 已知问题
+
+迁移后做过 Hermes 端到端 synthetic event，自检事件已经到达 GJZN Hermes，但 Hermes 模型调用返回：
+
+```text
+HTTP 402: Insufficient Balance
+```
+
+这表示 WoW -> relay -> Hermes 的链路是通的，但当前 Hermes 使用的 DeepSeek/custom provider 余额不足。瓦小狸不回复时，先修 Hermes `.env` 中的模型 provider/key/余额。
 
 ## 插电自动启动
 
@@ -170,7 +228,7 @@ Advanced Mode -> Advanced -> APM -> Restore AC Power Loss = Power On
 
 ## 后续动作
 
-1. 处理第二条内存无法启动的问题，目标至少 8GB。
-2. 接有线网并固定 DHCP 或静态地址。
+1. 接有线网并固定 DHCP 或静态地址。
+2. 修 Hermes provider 余额/key，让瓦小狸恢复回复。
 3. 建立本机 CMake build cache，不要从 RT 或旧开发机拷 build 目录。
-4. 如果要做热备，再设计 RT -> GJZN 的数据库备份、运行产物同步和明确的人工切换流程。
+4. 后续如要回滚 RT，先恢复 RT game FRP 代理，再导回数据库备份。

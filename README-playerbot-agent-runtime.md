@@ -2,7 +2,7 @@
 
 这是 `playerbot-agent` 分支的运行说明。它不是架构设计文档；架构和开发方向以 [ARCHITECTURE-agent-playerbots.md](ARCHITECTURE-agent-playerbots.md) 为准。
 
-当前生产服务器是 RT。当前开发机只负责写代码、测试、必要时编译，然后通过 `ops/rt-wow-migration/deploy.sh` 发布到 RT。不要把 T490 或本地 WSL worldserver 当成生产服务重启，除非明确是在做本地调试或回滚演练。
+当前生产服务器是 GJZN。当前开发机只负责写代码、测试、必要时编译，然后发布到 GJZN。不要把 T490、本地 WSL 或 RT worldserver 当成生产服务重启，除非明确是在做本地调试或回滚演练。
 
 ## 源码
 
@@ -15,19 +15,20 @@
 
 `modules/mod-playerbots` 是一个本地嵌套 Git checkout，并被根仓库忽略。这符合 AzerothCore 模块的常见使用方式。
 
-新开发机如果缺这个目录，先从 RT 当前生产工作树补齐，保证本地编译和生产模块一致：
+新开发机如果缺这个目录，先从 GJZN 当前生产工作树补齐，保证本地编译和生产模块一致：
 
 ```bash
-rsync -az --delete --exclude='.git/' -e 'ssh -p 8022' \
-  wuya@38.207.189.99:/home/wuya/git/azerothcore-wotlk-git/modules/mod-playerbots/ \
+rsync -az --delete --exclude='.git/' \
+  GJZN:/home/wuya/git/azerothcore-wotlk-git/modules/mod-playerbots/ \
   modules/mod-playerbots/
 ```
 
-## RT 生产路径
+## GJZN 生产路径
 
-- SSH：`ssh -p 8022 wuya@38.207.189.99`
-- RT 运行根目录：`/home/wuya/git/azerothcore-wotlk-git`
-- RT Compose：`/home/wuya/git/azerothcore-wotlk-git/ops/rt-wow-migration`
+- LAN SSH：`ssh GJZN`
+- 公网 SSH：`ssh GJZN-public`，`38.207.189.99:8026`
+- GJZN 运行根目录：`/home/wuya/git/azerothcore-wotlk-git`
+- Hermes Compose：`/home/wuya/srv/hermes-wow/docker-compose.yml`
 - Runtime：`/home/wuya/git/azerothcore-wotlk-git/env/dist`
 - worldserver 配置：`/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/worldserver.conf`
 - Playerbots 配置：`/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/modules/playerbots.conf`
@@ -36,7 +37,8 @@ rsync -az --delete --exclude='.git/' -e 'ssh -p 8022' \
 - Hermes Relay 环境文件：`/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/playerbot-hermes-relay.env`
 - 轻量账号注册页环境文件：`/home/wuya/git/azerothcore-wotlk-git/env/dist/etc/account-register.env`
 - 日志目录：`/home/wuya/git/azerothcore-wotlk-git/env/dist/logs`
-- 容器：`wow-auth`、`wow-world`、`hermes-wow`
+- 原生 systemd：`azerothcore-auth.service`、`azerothcore-world.service`
+- 容器：`hermes-wow`
 - systemd 侧车：`azerothcore-playerbot-mcp.service`、`azerothcore-playerbot-hermes-relay.service`、`azerothcore-account-register.service`
 
 端口：
@@ -63,7 +65,7 @@ Realm：
 
 ## 当前调优
 
-RT 现在按“可控 AddClass 小队优先、随机世界 bot 关闭”的低负载模式跑。AddClass bot 用于组队控制；随机世界 bot 能力保留，但 RT 的 J1900 CPU 不适合默认开 30-50 个随机 bot。
+GJZN 现在按“可控 AddClass 小队优先、随机世界 bot 关闭”的低负载模式跑。AddClass bot 用于组队控制；随机世界 bot 能力保留，但 8GB 内存和 WiFi 生产网络仍不适合默认开 30-50 个随机 bot。
 
 关键配置：
 
@@ -86,18 +88,22 @@ bot 账号前缀是 `pbagent`。初始数据库里有 55 个 bot 账号、550 �
 
 ## 常用操作
 
-查看 RT 状态：
+查看 GJZN 状态：
 
 ```bash
-ops/rt-wow-migration/deploy.sh status
+ssh GJZN 'systemctl is-active azerothcore-auth.service azerothcore-world.service azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service'
+ssh GJZN 'ss -ltnp | egrep ":(3724|8085|7879|8642|18765|18080)\b" || true'
+ssh GJZN 'docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
 ```
 
 部署 Python 侧车：
 
 ```bash
 python3 -m py_compile tools/playerbot-mcp/wow_common.py tools/playerbot-mcp/hermes_relay.py tools/playerbot-mcp/server.py
-ops/rt-wow-migration/deploy.sh deploy-sidecar
-ssh -p 8022 wuya@38.207.189.99 '/home/wuya/git/azerothcore-wotlk-git/var/playerbot-mcp-venv/bin/python -m unittest /home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/test_playerbot_mcp.py'
+rsync -az tools/playerbot-mcp/ GJZN:/home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/
+rsync -az tools/account-register/ GJZN:/home/wuya/git/azerothcore-wotlk-git/tools/account-register/
+ssh GJZN 'sudo systemctl restart azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service'
+ssh GJZN '/home/wuya/git/azerothcore-wotlk-git/var/playerbot-mcp-venv/bin/python -m unittest /home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/test_playerbot_mcp.py'
 ```
 
 部署 C++/world 前必须确认当前开发机有编译产物：

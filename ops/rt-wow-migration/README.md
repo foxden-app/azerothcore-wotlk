@@ -1,13 +1,28 @@
-# RT 生产运行和部署
+# RT 旧生产运行和回滚记录
 
-RT 现在是 AzerothCore PlayerBot 的生产服务器。开发机负责写代码、编译、测试和发布；RT 负责运行，不在 RT 上编译。
+2026-05-23 生产服已从 RT 迁到 GJZN。本文件保留 RT 旧生产拓扑、部署脚本和回滚参考。除非明确回滚，不要再把 `ops/rt-wow-migration/deploy.sh` 当作当前生产发布入口。
+
+当前生产真相见：
+
+- `ops/gjzn-bootstrap/README.md`
+- `ARCHITECTURE-agent-playerbots.md`
+- `README-playerbot-agent-runtime.md`
+
+RT 当前状态：
+
+- `wow-auth` / `wow-world` 容器已停。
+- `azerothcore-playerbot-mcp.service`、`azerothcore-playerbot-hermes-relay.service`、`azerothcore-account-register.service` 已停。
+- `hermes-wow` 容器已停。
+- RT 主 `frpc.service` 仍运行，用于非游戏代理和 RT SSH；游戏端口 3724/8085 的代理块已移除。
+- RT `frpc-chml-unicom.service` 已停，线路二由 GJZN 接管。
+- 最终迁移备份：`/home/wuya/backups/acore/acore-gjzn-cutover-20260523-230612.sql.gz`。
 
 ## 当前形态
 
-- RT 运行 `wow-auth`、`wow-world` 容器，使用 host network。
-- RT MySQL 承载生产库：`acore_auth`、`acore_playerbot_world`、`acore_playerbot_characters`、`acore_playerbots`。
-- Hermes 容器运行在 RT：`hermes-wow`，监听 `8642`。
-- MCP、Hermes relay、账号注册页运行在 RT systemd。
+- RT 旧生产曾运行 `wow-auth`、`wow-world` 容器，使用 host network。
+- RT MySQL 曾承载生产库：`acore_auth`、`acore_playerbot_world`、`acore_playerbot_characters`、`acore_playerbots`。
+- Hermes 容器曾运行在 RT：`hermes-wow`，监听 `8642`。
+- MCP、Hermes relay、账号注册页曾运行在 RT systemd。
 - 线路一：`38.207.189.99:8085`。
 - 线路二：`8.162.5.68:8085`，通过 auth alias `2:1` 指向同一个 worldserver。
 

@@ -1,42 +1,44 @@
 ---
 name: azerothcore-playerbot-ops
-description: Operate, debug, build, deploy, document, commit, and push the AzerothCore WotLK PlayerBot/Hermes stack. Use when working on RT production, local dev builds, MCP/Hermes relay sidecars, 瓦小狸/playerbot behavior, realmlist lines, systemd/container health, architecture truth docs, Chinese commit messages, or routine compile/deploy/restart troubleshooting.
+description: Operate, debug, build, deploy, document, commit, and push the AzerothCore WotLK PlayerBot/Hermes stack. Use when working on GJZN production, RT legacy rollback, local dev builds, MCP/Hermes relay sidecars, 瓦小狸/playerbot behavior, realmlist lines, systemd/container health, architecture truth docs, Chinese commit messages, or routine compile/deploy/restart troubleshooting.
 ---
 
 # AzerothCore PlayerBot Ops
 
 ## Current Truth
 
-RT is production. The development machine is for editing, testing, building, and publishing. Do not restart or resurrect T490/local worldserver as production unless the user explicitly asks.
+GJZN is production. The development machine is for editing, testing, building, and publishing. Do not restart or resurrect T490/local worldserver as production unless the user explicitly asks. Do not deploy to RT as production unless the user explicitly asks for rollback.
 
 Production shape:
 
-- RT SSH: `wuya@38.207.189.99 -p 8022`.
-- RT runtime root: `/home/wuya/git/azerothcore-wotlk-git`.
-- RT runs `wow-auth`, `wow-world`, and `hermes-wow` containers.
-- RT runs MCP, Hermes relay, and account register as systemd services.
+- GJZN LAN SSH: `ssh GJZN` / `wuya@192.168.1.248`.
+- GJZN public SSH: `ssh GJZN-public` / `wuya@38.207.189.99 -p 8026`.
+- GJZN runtime root: `/home/wuya/git/azerothcore-wotlk-git`.
+- GJZN runs `azerothcore-auth.service` and `azerothcore-world.service` natively under systemd.
+- GJZN runs `hermes-wow` as a Docker container from `/home/wuya/srv/hermes-wow/docker-compose.yml`.
+- GJZN runs MCP, Hermes relay, and account register as systemd services.
+- GJZN runs public game FRP with `frpc-acore-main.service` and `frpc-chml-unicom.service`.
 - Public realms: `线路一 -> 38.207.189.99:8085`, `线路二 -> 8.162.5.68:8085`.
 - Auth alias: `RealmList.RealmIDAliases = "2:1"`; both realms point to the same worldserver.
-- RT production DBs: `acore_auth`, `acore_playerbot_world`, `acore_playerbot_characters`, `acore_playerbots`.
+- Production DBs on GJZN MySQL: `acore_auth`, `acore_playerbot_world`, `acore_playerbot_characters`, `acore_playerbots`.
 
-GJZN is a new i7 development/build and standby candidate, not current production while it only has 4GB RAM:
+RT is now legacy/rollback for WoW:
 
-- GJZN SSH: `ssh GJZN` / `wuya@192.168.1.248`.
-- GJZN repo root: `/home/wuya/git/azerothcore-wotlk-git`.
-- GJZN runbook: `ops/gjzn-bootstrap/README.md`.
-- It has Ubuntu 24.04, Docker, Xray proxy, build deps, 16GB swap, no GUI target, and boot-enabled `ssh/docker/xray`.
-- Do not move RT production WoW to GJZN until memory is fixed to at least 8GB; 16GB is preferred.
+- RT SSH still works through `ssh RT` / `wuya@38.207.189.99 -p 8022`.
+- RT auth/world containers, MCP, relay, register, and `frpc-chml-unicom.service` are stopped after the 2026-05-23 GJZN cutover.
+- RT main `frpc.service` remains active for non-game proxies; its game proxies for 3724/8085 were removed.
+- Final RT cutover backup: `/home/wuya/backups/acore/acore-gjzn-cutover-20260523-230612.sql.gz`.
+- RT runbook is now historical unless explicitly rolling back.
 
-Primary ops entrypoint from the repo root:
+Primary production checks:
 
 ```bash
-ops/rt-wow-migration/deploy.sh status
-ops/rt-wow-migration/deploy.sh deploy-sidecar
-ops/rt-wow-migration/deploy.sh deploy-world
-ops/rt-wow-migration/deploy.sh backup-db
+ssh GJZN 'systemctl is-active azerothcore-auth.service azerothcore-world.service azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service frpc-acore-main.service frpc-chml-unicom.service mysql docker xray'
+ssh GJZN 'ss -ltnp | egrep ":(3724|8085|7879|8642|18765|18080)\b" || true'
+ssh GJZN 'docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
 ```
 
-Use `RT_HOST=192.168.1.179` only when intentionally targeting RT over LAN.
+`ops/rt-wow-migration/deploy.sh` still targets RT by default. Do not use it for GJZN production until it is updated for the native GJZN topology.
 
 ## First Moves
 
@@ -45,15 +47,16 @@ Before changing anything:
 ```bash
 pwd
 git status --short --branch
-ops/rt-wow-migration/deploy.sh status
+ssh GJZN 'hostname; systemctl is-active azerothcore-world.service azerothcore-playerbot-hermes-relay.service frpc-acore-main.service frpc-chml-unicom.service'
 ```
 
 If investigating a player report like “瓦小狸不说话”:
 
-1. Check RT services and ports with `deploy.sh status`.
+1. Check GJZN services and ports with the production checks above.
 2. Check relay/MCP health and recent event/action rows; do not dump full raw relay JSON unless necessary.
 3. Confirm the reporter is online before expecting replies or bot actions; old offline events often fail with `requester is not online`.
 4. If stale events accumulated while relay was broken, mark only those stale rows processed and advance relay state to the latest event, then restart the relay.
+5. If relay reaches Hermes but Hermes returns `HTTP 402: Insufficient Balance`, the game/MCP path is up and the model provider balance/key must be fixed.
 
 Talent and GM-operation truth:
 
@@ -65,7 +68,7 @@ Talent and GM-operation truth:
 Useful targeted query:
 
 ```bash
-ssh -p 8022 wuya@38.207.189.99 'MYSQL_PWD=acore mysql -uacore -e "
+ssh GJZN 'MYSQL_PWD=acore mysql -uacore -h127.0.0.1 -e "
   SELECT id,speaker_name,message,created_at,processed_at
   FROM acore_playerbots.agent_playerbot_events
   ORDER BY id DESC LIMIT 12;
@@ -81,21 +84,23 @@ ssh -p 8022 wuya@38.207.189.99 'MYSQL_PWD=acore mysql -uacore -e "
 
 ## Deploy Rules
 
-Sidecar-only changes include `tools/playerbot-mcp/`, `tools/account-register/`, RT systemd unit changes, relay logic, MCP tools, and registration page code.
+Sidecar-only changes include `tools/playerbot-mcp/`, `tools/account-register/`, GJZN systemd unit changes, relay logic, MCP tools, and registration page code.
 
 ```bash
 python3 -m py_compile tools/playerbot-mcp/wow_common.py tools/playerbot-mcp/hermes_relay.py tools/playerbot-mcp/server.py
-ops/rt-wow-migration/deploy.sh deploy-sidecar
-ssh -p 8022 wuya@38.207.189.99 '/home/wuya/git/azerothcore-wotlk-git/var/playerbot-mcp-venv/bin/python -m unittest /home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/test_playerbot_mcp.py'
+rsync -az tools/playerbot-mcp/ GJZN:/home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/
+rsync -az tools/account-register/ GJZN:/home/wuya/git/azerothcore-wotlk-git/tools/account-register/
+ssh GJZN 'sudo systemctl restart azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service'
+ssh GJZN '/home/wuya/git/azerothcore-wotlk-git/var/playerbot-mcp-venv/bin/python -m unittest /home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/test_playerbot_mcp.py'
 ```
 
 C++/world changes include `modules/mod-playerbot-agent/`, core code, `modules/mod-playerbots/`, SQL source, or runtime binary changes. These require a local build and `env/dist/bin/authserver` plus `env/dist/bin/worldserver`.
 
-`modules/mod-playerbots/` is an ignored external module checkout. If it is absent on a new dev machine, hydrate it before configuring CMake. Prefer the RT production working tree when trying to reproduce production exactly:
+`modules/mod-playerbots/` is an ignored external module checkout. If it is absent on a new dev machine, hydrate it before configuring CMake. Prefer the GJZN production working tree when trying to reproduce production exactly:
 
 ```bash
-rsync -az --delete --exclude='.git/' -e 'ssh -p 8022' \
-  wuya@38.207.189.99:/home/wuya/git/azerothcore-wotlk-git/modules/mod-playerbots/ \
+rsync -az --delete --exclude='.git/' \
+  GJZN:/home/wuya/git/azerothcore-wotlk-git/modules/mod-playerbots/ \
   modules/mod-playerbots/
 ```
 
@@ -125,27 +130,27 @@ cmake -S . -B var/build/obj -G Ninja \
   -DBoost_USE_STATIC_LIBS=ON
 cmake --build var/build/obj --target authserver worldserver -j16
 cmake --install var/build/obj --config Release
-ops/rt-wow-migration/deploy.sh deploy-world
+echo "GJZN deploy-world path is native/systemd now; update the runbook before using old RT deploy-world."
 ```
 
-`deploy-world` backs up RT DBs, rebuilds the runtime image from local binary libraries, syncs only auth/world binaries plus SQL/module sources, and restarts RT auth/world. It intentionally does not sync all of `env/dist/bin`, to avoid deleting RT maps/vmaps/mmaps from a new dev machine.
+The old `deploy-world` backs up RT DBs and deploys to RT containers. It is not the GJZN production deploy path after 2026-05-23.
 
 ## Service And Log Hygiene
 
-RT service checks:
+GJZN service checks:
 
 ```bash
-ssh -p 8022 wuya@38.207.189.99 'systemctl is-active azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service'
-ssh -p 8022 wuya@38.207.189.99 'ss -ltnp | egrep ":(3724|8085|7879|8642|18765|18080)\b" || true'
-ssh -p 8022 wuya@38.207.189.99 'cd /home/wuya/git/azerothcore-wotlk-git/ops/rt-wow-migration && docker compose ps'
+ssh GJZN 'systemctl is-active azerothcore-auth.service azerothcore-world.service azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service'
+ssh GJZN 'ss -ltnp | egrep ":(3724|8085|7879|8642|18765|18080)\b" || true'
+ssh GJZN 'docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
 ```
 
 Prefer compact logs:
 
 ```bash
-ssh -p 8022 wuya@38.207.189.99 'journalctl -u azerothcore-playerbot-mcp.service -u azerothcore-playerbot-hermes-relay.service -n 120 --no-pager'
-ssh -p 8022 wuya@38.207.189.99 'tail -120 /home/wuya/git/azerothcore-wotlk-git/env/dist/logs/playerbot-mcp.log'
-ssh -p 8022 wuya@38.207.189.99 'docker logs --tail 160 wow-world'
+ssh GJZN 'journalctl -u azerothcore-world.service -u azerothcore-playerbot-mcp.service -u azerothcore-playerbot-hermes-relay.service -n 160 --no-pager'
+ssh GJZN 'tail -120 /home/wuya/git/azerothcore-wotlk-git/env/dist/logs/playerbot-mcp.log'
+ssh GJZN 'docker logs --tail 160 hermes-wow'
 ```
 
 Do not print full env files, Hermes config, bearer tokens, API keys, DB passwords, SOAP passwords, or full raw relay JSON. Redact secrets and use narrow `rg`/SQL selections.
@@ -157,6 +162,7 @@ When changing PlayerBot behavior, MCP/Hermes sidecars, RT deploy flow, service t
 - `ARCHITECTURE-agent-playerbots.md`
 - `README-playerbot-agent-runtime.md`
 - `ops/rt-wow-migration/README.md`
+- `ops/gjzn-bootstrap/README.md`
 - `ops/codex-skills/azerothcore-playerbot-ops/`
 - `doc/agent-playerbot-architecture.dot` and rendered `.svg/.png` if topology changes
 - `ROADMAP-agent-playerbots.md` only when the product/implementation roadmap changes
@@ -168,9 +174,10 @@ Cloud docs are part of the operating surface because teammates read there. When 
 - Source-of-truth manifest and helper: `ops/tencent-docs/cloud-docs.json`, `ops/tencent-docs/sync-docs.sh`
 - Folder: `AzerothCore PlayerBot RT 文档`
 - Folder URL: `https://docs.qq.com/desktop/mydoc/folder/dCqgFyBeqUwT`
-- Cloud architecture smart doc: `https://docs.qq.com/aio/DZHBDcVVDWE5Ma1F3`
-- Runtime README: `https://docs.qq.com/doc/DZHZaVFRnaFptZVdy`
-- RT runbook: `https://docs.qq.com/doc/DZE9mZmVETnVMdktD`
+- Cloud architecture doc: `https://docs.qq.com/doc/DZFVEZWVnU0hyb1ZS`
+- Runtime README: `https://docs.qq.com/doc/DZE9JV3JkRWxvZ0Jt`
+- RT runbook: `https://docs.qq.com/doc/DZEpTcUdvWWtiVWtE`
+- GJZN runbook: `https://docs.qq.com/doc/DZFFKWFpMa2pVeHpT`
 - Agent README: `https://docs.qq.com/markdown/DZERueEhFekd1aFR2`
 - Tencent Docs sync runbook: `https://docs.qq.com/doc/DZG9wYWhpTmRLQXVJ`
 
