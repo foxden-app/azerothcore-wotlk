@@ -1,0 +1,61 @@
+{
+  "folder": {
+    "title": "AzerothCore PlayerBot RT 文档",
+    "id": "dCqgFyBeqUwT",
+    "url": "https://docs.qq.com/desktop/mydoc/folder/dCqgFyBeqUwT"
+  },
+  "documents": [
+    {
+      "key": "architecture",
+      "title": "ARCHITECTURE-agent-playerbots 云端版",
+      "source": "ARCHITECTURE-agent-playerbots.md",
+      "file_id": "dpCqUCXNLkQw",
+      "url": "https://docs.qq.com/aio/DZHBDcVVDWE5Ma1F3",
+      "sync": {
+        "mode": "manual_image_doc",
+        "reason": "包含本地架构图，需要先 upload_image 并替换为 image_id。"
+      }
+    },
+    {
+      "key": "runtime-readme",
+      "title": "README-playerbot-agent-runtime",
+      "source": "README-playerbot-agent-runtime.md",
+      "file_id": "dvZTTghZmeWr",
+      "url": "https://docs.qq.com/doc/DZHZaVFRnaFptZVdy",
+      "sync": {
+        "mode": "doc_from_markdown"
+      }
+    },
+    {
+      "key": "rt-runbook",
+      "title": "RT-runbook",
+      "source": "ops/rt-wow-migration/README.md",
+      "file_id": "dOffeDNuLvKC",
+      "url": "https://docs.qq.com/doc/DZE9mZmVETnVMdktD",
+      "sync": {
+        "mode": "doc_from_markdown"
+      }
+    },
+    {
+      "key": "agent-readme",
+      "title": "README-agent-playerbots",
+      "source": "README-agent-playerbots.md",
+      "file_id": "dDnxHEzGuhTv",
+      "url": "https://docs.qq.com/markdown/DZERueEhFekd1aFR2",
+      "sync": {
+        "mode": "manual_existing"
+      }
+    },
+    {
+      "key": "tencent-docs-runbook",
+      "title": "Tencent-docs-sync-runbook",
+      "source": "ops/tencent-docs/README.md",
+      "file_id": "dopahiNdKAuI",
+      "url": "https://docs.qq.com/doc/DZG9wYWhpTmRLQXVJ",
+      "sync": {
+        "mode": "doc_from_markdown"
+      },
+      "last_synced_at": "2026-05-23T13:51:20+08:00"
+    }
+  ]
+}

@@ -18,12 +18,15 @@ Build artifacts may be absent on a new dev machine. Verify before C++ deploy:
 
 Tencent Docs:
 
+- Manifest: `ops/tencent-docs/cloud-docs.json`
+- Sync helper: `ops/tencent-docs/sync-docs.sh`
 - Folder: `AzerothCore PlayerBot RT 文档`
 - Folder URL: `https://docs.qq.com/desktop/mydoc/folder/dCqgFyBeqUwT`
 - Architecture smart doc: `https://docs.qq.com/aio/DZHBDcVVDWE5Ma1F3`
 - Runtime README: `https://docs.qq.com/doc/DZHZaVFRnaFptZVdy`
 - RT runbook: `https://docs.qq.com/doc/DZE9mZmVETnVMdktD`
 - Agent README: `https://docs.qq.com/markdown/DZERueEhFekd1aFR2`
+- Tencent Docs sync runbook: `https://docs.qq.com/doc/DZG9wYWhpTmRLQXVJ`
 
 ## RT Production
 
