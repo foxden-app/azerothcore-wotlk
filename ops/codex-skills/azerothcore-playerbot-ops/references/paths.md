@@ -5,8 +5,8 @@
 - Current dev checkout: `/home/wuya/git_wsl/azerothcore-wotlk`
 - Repo skill source: `ops/codex-skills/azerothcore-playerbot-ops`
 - Installed Codex skill target: `${CODEX_HOME:-/mnt/c/Users/chuan/.codex}/skills/azerothcore-playerbot-ops`
-- RT deploy script: `ops/rt-wow-migration/deploy.sh`
-- RT deploy runbook: `ops/rt-wow-migration/README.md`
+- GJZN runbook: `ops/gjzn-bootstrap/README.md`
+- RT rollback runbook: `ops/rt-wow-migration/README.md`
 
 Build artifacts may be absent on a new dev machine. Verify before C++ deploy:
 
@@ -14,7 +14,7 @@ Build artifacts may be absent on a new dev machine. Verify before C++ deploy:
 - Runtime binaries: `env/dist/bin/authserver`, `env/dist/bin/worldserver`
 - Expected install prefix when using `var/build/obj`: `env/dist`
 - Ignored external module: `modules/mod-playerbots/`
-- RT production module source: `/home/wuya/git/azerothcore-wotlk-git/modules/mod-playerbots`
+- GJZN production module source: `/home/wuya/git/azerothcore-wotlk-git/modules/mod-playerbots`
 
 Tencent Docs:
 
@@ -22,36 +22,39 @@ Tencent Docs:
 - Sync helper: `ops/tencent-docs/sync-docs.sh`
 - Folder: `AzerothCore PlayerBot RT 文档`
 - Folder URL: `https://docs.qq.com/desktop/mydoc/folder/dCqgFyBeqUwT`
-- Architecture smart doc: `https://docs.qq.com/aio/DZHBDcVVDWE5Ma1F3`
-- Runtime README: `https://docs.qq.com/doc/DZHZaVFRnaFptZVdy`
-- RT runbook: `https://docs.qq.com/doc/DZE9mZmVETnVMdktD`
+- Architecture doc: `https://docs.qq.com/doc/DZFVEZWVnU0hyb1ZS`
+- Runtime README: `https://docs.qq.com/doc/DZFlaZE10TXpWQm9Y`
+- RT runbook: `https://docs.qq.com/doc/DZEpTcUdvWWtiVWtE`
+- GJZN runbook: `https://docs.qq.com/doc/DZFFKWFpMa2pVeHpT`
 - Agent README: `https://docs.qq.com/markdown/DZERueEhFekd1aFR2`
 - Tencent Docs sync runbook: `https://docs.qq.com/doc/DZG9wYWhpTmRLQXVJ`
 
-## RT Production
+## GJZN Production
 
-- SSH: `ssh -p 8022 wuya@38.207.189.99`
-- LAN address: `192.168.1.179`
-- RT runtime root: `/home/wuya/git/azerothcore-wotlk-git`
-- RT compose path: `/home/wuya/git/azerothcore-wotlk-git/ops/rt-wow-migration`
+- LAN SSH: `ssh GJZN`
+- Public SSH: `ssh GJZN-public`
+- LAN address: `192.168.1.248`
+- GJZN runtime root: `/home/wuya/git/azerothcore-wotlk-git`
+- Hermes compose path: `/home/wuya/srv/hermes-wow/docker-compose.yml`
 - Runtime files: `/home/wuya/git/azerothcore-wotlk-git/env/dist`
 - Configs: `/home/wuya/git/azerothcore-wotlk-git/env/dist/etc`
 - Logs: `/home/wuya/git/azerothcore-wotlk-git/env/dist/logs`
-- Runtime image libs: `/home/wuya/git/azerothcore-wotlk-git/ops/rt-wow-migration/libs` (ignored by git)
 
-RT containers:
+GJZN services:
 
-- `wow-auth`: authserver, host network, port `3724`
-- `wow-world`: worldserver, host network, ports `8085` and SOAP `7879`
-- `hermes-wow`: Hermes API, port `8642`
+- `azerothcore-auth.service`: authserver, port `3724`
+- `azerothcore-world.service`: worldserver, ports `8085` and SOAP `7879`
+- `hermes-wow`: Hermes API container, port `8642`
+- `frpc-acore-main.service`: public line 1
+- `frpc-chml-unicom.service`: public line 2
 
-RT systemd sidecars:
+GJZN systemd sidecars:
 
 - `azerothcore-playerbot-mcp.service`: MCP, port `18765`
 - `azerothcore-playerbot-hermes-relay.service`: event relay
 - `azerothcore-account-register.service`: registration page, `127.0.0.1:18080`
 
-RT databases:
+GJZN databases:
 
 - Login DB: `acore_auth`
 - World DB: `acore_playerbot_world`
@@ -65,7 +68,7 @@ Realms:
 - `RealmList.RealmIDAliases = "2:1"`
 - Both realms use `flag=0`, `timezone=16`, `localSubnetMask=255.255.255.255`, build `12340`
 
-RT production config facts:
+GJZN production config facts:
 
 - `RealmID = 1`
 - `RealmZone = 16`
@@ -80,4 +83,4 @@ RT production config facts:
 - `AgentPlayerbot.AnchorBotAutologin = 1`
 - `AgentPlayerbot.AnchorBotName = "瓦小狸"`
 
-Do not expose RT MySQL to the public internet. Do not commit RT env files, GM password files, DB dumps, logs, or runtime `libs/`.
+Do not expose GJZN MySQL to the public internet. Do not commit env files, GM password files, DB dumps, logs, or runtime `libs/`.

@@ -322,7 +322,13 @@ ssh -p 8022 wuya@38.207.189.99 'journalctl -u azerothcore-playerbot-hermes-relay
 ssh -p 8022 wuya@38.207.189.99 'docker logs -f hermes-wow'
 ```
 
-`PLAYERBOT_HERMES_TRACE_RAW=1` 时，relay 日志会记录发给 Hermes 的完整事件包、最近动作结果、Hermes 响应文本和原始响应。API key 和 MCP bearer token 只放在 RT 的私有 env/config 文件里，不要提交到 git。
+`PLAYERBOT_HERMES_STORE=0` 是生产默认值：WoW 事件不写入 Hermes 长会话，避免历史上下文膨胀到十几万 token。上下文优先从当前事件、队伍快照和数据库里的最近动作结果取得。需要临时保留 Hermes 会话记忆时再显式改成 `1`。
+
+`PLAYERBOT_HERMES_CONVERSATION_EPOCH` 用来主动切换 Hermes 会话命名空间。迁服、工具配置变化或旧会话上下文过大时，改一个新值即可让后续消息进入新会话，避开旧 event_id 和长历史。
+
+`PLAYERBOT_HERMES_TRACE_RAW=1` 时，relay 日志会记录发给 Hermes 的完整事件包、最近动作结果、Hermes 响应文本和原始响应。生产默认关闭，避免日志膨胀和重复保存大事件包。API key 和 MCP bearer token 只放在 GJZN 的私有 env/config 文件里，不要提交到 git。
+
+relay 对纯问候、在不在、感谢、提供法师吃喝、叫回离线队友等高频简单意图有确定性 fast-path。这些事件直接写 `agent_playerbot_actions`，不进入 Hermes，避免无谓 token 消耗。
 
 Hermes 的最终 assistant 文本只会进入 relay/Hermes 日志，不会显示在游戏聊天里。玩家需要看见的回答、失败原因、澄清问题或闲聊回复，都必须由 Agent 调用 `wow_reply`；`no_action` 只用于确实不需要可见回复、也不需要动作的背景消息。
 

@@ -57,6 +57,7 @@ If investigating a player report like “瓦小狸不说话”:
 3. Confirm the reporter is online before expecting replies or bot actions; old offline events often fail with `requester is not online`.
 4. If stale events accumulated while relay was broken, mark only those stale rows processed and advance relay state to the latest event, then restart the relay.
 5. If relay reaches Hermes but Hermes returns `HTTP 402: Insufficient Balance`, the game/MCP path is up and the model provider balance/key must be fixed.
+6. Keep production resource use low: `PLAYERBOT_HERMES_STORE=0`, `PLAYERBOT_HERMES_TRACE_RAW=0`, and a current `PLAYERBOT_HERMES_CONVERSATION_EPOCH` should be set on GJZN. Pure greetings/thanks, consumables, and offline-party wakeups use relay fast-paths and should not call Hermes.
 
 Talent and GM-operation truth:
 
@@ -175,7 +176,7 @@ Cloud docs are part of the operating surface because teammates read there. When 
 - Folder: `AzerothCore PlayerBot RT 文档`
 - Folder URL: `https://docs.qq.com/desktop/mydoc/folder/dCqgFyBeqUwT`
 - Cloud architecture doc: `https://docs.qq.com/doc/DZFVEZWVnU0hyb1ZS`
-- Runtime README: `https://docs.qq.com/doc/DZE9JV3JkRWxvZ0Jt`
+- Runtime README: `https://docs.qq.com/doc/DZFlaZE10TXpWQm9Y`
 - RT runbook: `https://docs.qq.com/doc/DZEpTcUdvWWtiVWtE`
 - GJZN runbook: `https://docs.qq.com/doc/DZFFKWFpMa2pVeHpT`
 - Agent README: `https://docs.qq.com/markdown/DZERueEhFekd1aFR2`

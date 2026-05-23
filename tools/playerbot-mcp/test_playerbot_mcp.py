@@ -79,6 +79,38 @@ class CommonTests(unittest.TestCase):
         self.assertIn("`id` <= 15", db.executed[0])
         self.assertIn("`processed_at` IS NULL", db.executed[0])
 
+    def test_hermes_client_can_disable_response_store(self):
+        captured = {}
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"id":"resp_test","status":"completed","output":[]}'
+
+        def fake_urlopen(request, timeout):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+
+        client = hermes_relay.HermesClient(
+            "http://127.0.0.1:8642/v1/responses",
+            api_key="",
+            model="hermes-agent",
+            timeout=1,
+            store=False,
+        )
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            client.send_event(conversation="wow-test", event={"id": 1}, action_results=[])
+
+        self.assertFalse(captured["payload"]["store"])
+
     def test_combat_summary_compact_keeps_key_facts(self):
         facts = {
             "totals": {
@@ -193,6 +225,17 @@ class CommonTests(unittest.TestCase):
     def test_conversation_for_solo(self):
         event = {"channel": "say", "speaker_guid": 10, "bot_guid": None, "group_leader_guid": None}
         self.assertEqual(hermes_relay.conversation_for(event), "wow-player-10")
+
+    def test_conversation_for_adds_epoch_when_configured(self):
+        event = {"channel": "whisper", "speaker_guid": 10, "bot_guid": 20, "group_leader_guid": 99}
+        with patch.dict("os.environ", {"PLAYERBOT_HERMES_CONVERSATION_EPOCH": "gjzn-20260523"}):
+            self.assertEqual(hermes_relay.conversation_for(event), "wow-whisper-10-20-gjzn-20260523")
+
+    def test_simple_social_reply_text(self):
+        self.assertEqual(hermes_relay.simple_social_reply_text("晚上好"), "晚上好，我在。")
+        self.assertEqual(hermes_relay.simple_social_reply_text("小狸，在吗？"), "我在。")
+        self.assertEqual(hermes_relay.simple_social_reply_text("瓦小狸谢谢"), "不客气。")
+        self.assertIsNone(hermes_relay.simple_social_reply_text("晚上好，帮我叫队友上线"))
 
     def test_clean_playerbot_command_strips_prefix(self):
         self.assertEqual(server.clean_playerbot_command_line(".playerbots bot remove Gessa"), "remove Gessa")

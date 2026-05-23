@@ -74,6 +74,22 @@ TEAM_ONLINE_RE = re.compile(
     r"(?:队友|队伍|小队|队里|组里|他们|大家|灰名|离线).{0,12}(?:上线|上来|回来|叫回|叫回来|拉回|拉回来|归队)"
     r"|(?:上线|上来|回来|叫回|叫回来|拉回|拉回来|归队).{0,12}(?:队友|队伍|小队|队里|组里|他们|大家|灰名|离线)"
 )
+SOCIAL_PUNCT_RE = re.compile(r"[，。！？!?,.～~、：:；;]+")
+GREETING_MESSAGES = {
+    "hi",
+    "hello",
+    "hey",
+    "你好",
+    "您好",
+    "早",
+    "早上好",
+    "上午好",
+    "中午好",
+    "下午好",
+    "晚上好",
+}
+PING_MESSAGES = {"在吗", "你在吗", "在不在", "在么", "你在么"}
+THANKS_MESSAGES = {"谢谢", "谢了", "多谢", "辛苦了", "感谢"}
 
 INSTRUCTIONS = """你是 WoW PlayerBot 队伍级 Agent。
 
@@ -108,12 +124,21 @@ INSTRUCTIONS = """你是 WoW PlayerBot 队伍级 Agent。
 
 
 class HermesClient:
-    def __init__(self, url: str, api_key: str, model: str, timeout: int, trace_raw: bool = False) -> None:
+    def __init__(
+        self,
+        url: str,
+        api_key: str,
+        model: str,
+        timeout: int,
+        trace_raw: bool = False,
+        store: bool = False,
+    ) -> None:
         self.url = url
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
         self.trace_raw = trace_raw
+        self.store = store
 
     def send_event(self, *, conversation: str, event: dict[str, Any], action_results: list[dict[str, Any]]) -> dict[str, Any]:
         envelope = {
@@ -131,7 +156,7 @@ class HermesClient:
                 "若需要回复或调度 bot，请调用 wow_playerbot MCP 工具，所有动作和回复都传 current_event_id。\n"
                 + json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
             ),
-            "store": True,
+            "store": self.store,
         }
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -219,10 +244,16 @@ def conversation_for(event: dict[str, Any]) -> str:
     leader_guid = int(event.get("group_leader_guid") or 0)
 
     if channel == "whisper" and bot_guid:
-        return f"wow-whisper-{speaker_guid}-{bot_guid}"
-    if leader_guid:
-        return f"wow-party-{leader_guid}"
-    return f"wow-player-{speaker_guid}"
+        base = f"wow-whisper-{speaker_guid}-{bot_guid}"
+    elif leader_guid:
+        base = f"wow-party-{leader_guid}"
+    else:
+        base = f"wow-player-{speaker_guid}"
+
+    epoch = os.getenv("PLAYERBOT_HERMES_CONVERSATION_EPOCH", "").strip()
+    if epoch:
+        return f"{base}-{epoch}"
+    return base
 
 
 def unique_names(names: list[str]) -> list[str]:
@@ -294,6 +325,28 @@ def should_skip_event(event: dict[str, Any]) -> tuple[bool, str]:
 
 def compact_message(message: str) -> str:
     return re.sub(r"\s+", "", str(message or "")).strip().lower()
+
+
+def simple_social_reply_text(message: str) -> str | None:
+    text = SOCIAL_PUNCT_RE.sub("", compact_message(message))
+    if not text:
+        return None
+    for alias in sorted((alias.lower() for alias in anchor_bot_aliases()), key=len, reverse=True):
+        if text.startswith(alias):
+            text = text[len(alias):]
+        if text.endswith(alias):
+            text = text[: -len(alias)]
+    if text in GREETING_MESSAGES:
+        if "晚" in text:
+            return "晚上好，我在。"
+        if "早" in text:
+            return "早上好，我在。"
+        return "你好，我在。"
+    if text in PING_MESSAGES:
+        return "我在。"
+    if text in THANKS_MESSAGES:
+        return "不客气。"
+    return None
 
 
 def parse_stack_count(text: str) -> int:
@@ -640,6 +693,8 @@ class Relay:
                 anchor_aliases=anchor_bot_aliases(),
             )
             return
+        if self.try_handle_simple_social_message(event):
+            return
         if self.try_handle_consumable_request(event):
             return
         if self.try_handle_team_online_request(event):
@@ -655,6 +710,24 @@ class Relay:
         self.client.send_event(conversation=conversation, event=event, action_results=action_results)
         settled_results = self.wait_for_action_results(int(event["id"]))
         self.ensure_visible_reply(event, settled_results)
+
+    def try_handle_simple_social_message(self, event: dict[str, Any]) -> bool:
+        reply = simple_social_reply_text(str(event.get("message") or ""))
+        if not reply:
+            return False
+        channel = str(event.get("channel") or "party").strip().lower()
+        if channel not in REPLY_CHANNELS:
+            channel = "party"
+        log_event(
+            "fast_social_reply",
+            event_id=event["id"],
+            channel=channel,
+            speaker=event.get("speaker_name"),
+            message=event.get("message"),
+            reply=reply,
+        )
+        self.enqueue_visible_reply(event, reply, channel=channel, reason="fast_social_reply")
+        return True
 
     def try_handle_consumable_request(self, event: dict[str, Any]) -> bool:
         request = parse_consumable_request(str(event.get("message") or ""))
@@ -681,7 +754,12 @@ class Relay:
                 water_stacks=water,
                 food_stacks=food,
             )
-            self.enqueue_visible_reply(event, f"我没看到你附近有可控法师，先叫个法师再做{label}。", channel=channel)
+            self.enqueue_visible_reply(
+                event,
+                f"我没看到你附近有可控法师，先叫个法师再做{label}。",
+                channel=channel,
+                reason="fast_consumable_no_mage",
+            )
             return True
 
         enqueue_result = enqueue_action(
@@ -720,7 +798,7 @@ class Relay:
         else:
             reply = f"已让{mage_name}做{label}，服务端结果还在等。"
 
-        self.enqueue_visible_reply(event, reply, channel=channel, requested_bot=mage_name)
+        self.enqueue_visible_reply(event, reply, channel=channel, requested_bot=mage_name, reason="fast_consumable_result")
         return True
 
     def try_handle_team_online_request(self, event: dict[str, Any]) -> bool:
@@ -741,7 +819,7 @@ class Relay:
                 speaker=event.get("speaker_name"),
                 message=event.get("message"),
             )
-            self.enqueue_visible_reply(event, "我当前队伍快照里没看到离线机器人队友。", channel=channel)
+            self.enqueue_visible_reply(event, "我当前队伍快照里没看到离线机器人队友。", channel=channel, reason="fast_team_online_no_targets")
             return True
 
         action_ids: list[int] = []
@@ -792,7 +870,7 @@ class Relay:
             parts.append("已叫回：" + "、".join(done[:8]))
         if failed:
             parts.append("没叫回：" + "；".join(failed[:4]))
-        self.enqueue_visible_reply(event, "。".join(parts) + "。", channel=channel)
+        self.enqueue_visible_reply(event, "。".join(parts) + "。", channel=channel, reason="fast_team_online_result")
         return True
 
     def wait_for_action_result(self, event_id: int, action_id: int, timeout_seconds: float = 6.0) -> dict[str, Any] | None:
@@ -815,6 +893,7 @@ class Relay:
         *,
         channel: str,
         requested_bot: str = "",
+        reason: str = "fast_path_reply",
     ) -> None:
         bot_name = select_reply_bot(event, [], requested=requested_bot, channel=channel)
         if not bot_name:
@@ -834,17 +913,18 @@ class Relay:
             text=text,
             payload={
                 "fallback": True,
-                "fallback_reason": "fast_consumable_result",
+                "fallback_reason": reason,
                 "requested_bot": requested_bot,
             },
         )
         log_event(
-            "fast_consumable_reply",
+            "fast_path_reply",
             event_id=event.get("id"),
             action_id=enqueue_result.get("action_id"),
             bot=bot_name,
             channel=channel,
             text=text,
+            reason=reason,
             requested_bot=requested_bot,
             deduped=enqueue_result.get("deduped"),
         )
@@ -951,6 +1031,7 @@ def main() -> int:
         os.getenv("PLAYERBOT_HERMES_MODEL", "hermes-agent"),
         env_int("PLAYERBOT_HERMES_TIMEOUT", 120, 1),
         trace_raw=env_bool("PLAYERBOT_HERMES_TRACE_RAW", False),
+        store=env_bool("PLAYERBOT_HERMES_STORE", False),
     )
     relay = Relay(
         db,
@@ -967,6 +1048,7 @@ def main() -> int:
         last_id=relay.last_id,
         hermes_url=client.url,
         model=client.model,
+        store=client.store,
         state=str(args.state),
     )
     relay.save()
