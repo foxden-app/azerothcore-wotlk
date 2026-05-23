@@ -330,7 +330,9 @@ ssh -p 8022 wuya@38.207.189.99 'docker logs -f hermes-wow'
 
 `PLAYERBOT_HERMES_TRACE_RAW=1` 时，relay 日志会记录发给 Hermes 的完整事件包、最近动作结果、Hermes 响应文本和原始响应。生产默认关闭，避免日志膨胀和重复保存大事件包。API key 和 MCP bearer token 只放在 GJZN 的私有 env/config 文件里，不要提交到 git。
 
-relay 对纯问候、在不在、感谢、提供法师吃喝、叫回离线队友等高频简单意图有确定性 fast-path。这些事件直接写 `agent_playerbot_actions`，不进入 Hermes，避免无谓 token 消耗。
+relay 对瓦小狸入口做白名单控制。生产默认 `PLAYERBOT_HERMES_ALLOW_ALL_PLAYERS=0`、`PLAYERBOT_HERMES_ALLOWED_PLAYER_NAMES="Wuya"`；也可以用 `PLAYERBOT_HERMES_ALLOWED_PLAYER_GUIDS` 或 `PLAYERBOT_HERMES_ALLOWED_ACCOUNTS` 补充。未授权角色的事件只记录 `relay_event_unauthorized` 并标记已处理，不进入 Hermes，也不会入队任何游戏动作。
+
+relay 对纯问候、在不在、感谢、提供法师吃喝、叫回离线队友等高频简单意图有确定性 fast-path。这些事件直接写 `agent_playerbot_actions`，不进入 Hermes，避免无谓 token 消耗；白名单校验仍然先于这些 fast-path。
 
 Hermes 的最终 assistant 文本只会进入 relay/Hermes 日志，不会显示在游戏聊天里。玩家需要看见的回答、失败原因、澄清问题或闲聊回复，都必须由 Agent 调用 `wow_reply`；`no_action` 只用于确实不需要可见回复、也不需要动作的背景消息。
 
@@ -340,7 +342,7 @@ relay 每轮都会把当前事件写成 `current_event_id` 发给 Hermes。所�
 
 如果动作结果是 `requester is not online`，relay 不再继续补发同一条兜底回复；这类错误通常表示 worldserver 当刻没拿到请求玩家会话，重复入队只会制造噪声。对应的服务端修正是让 `mod-playerbot-agent` 用 connected player 查找请求者。
 
-固定入口 bot 配置在 MCP 和 relay 的 env 文件里：`PLAYERBOT_AGENT_ANCHOR_BOT_NAME="瓦小狸"`，`PLAYERBOT_AGENT_ANCHOR_ALIASES="小狸"`。say/yell 点名瓦小狸时由它承接；whisper 仍由被私聊的 bot 回复；party/raid 仍按当前队伍上下文回复，只有瓦小狸在当前上下文里时 MCP 才会优先用它。`PLAYERBOT_HERMES_IGNORE_UNADDRESSED_SAY="1"` 时，relay 会跳过没有点名瓦小狸/小狸的普通 `/s` 或 `/y`，避免本地闲聊误触发 Hermes。
+固定入口 bot 配置在 MCP 和 relay 的 env 文件里：`PLAYERBOT_AGENT_ANCHOR_BOT_NAME="瓦小狸"`，`PLAYERBOT_AGENT_ANCHOR_ALIASES="小狸"`。whisper 以及 `/s`、`/y` 里点名瓦小狸的直接会话按发言角色 GUID 隔离，避免不同角色串上下文；party/raid 仍按队伍级上下文回复，只有瓦小狸在当前上下文里时 MCP 才会优先用它。`PLAYERBOT_HERMES_IGNORE_UNADDRESSED_SAY="1"` 时，relay 会跳过没有点名瓦小狸/小狸的普通 `/s` 或 `/y`，避免本地闲聊误触发 Hermes。
 
 worldserver 侧的固定入口由 `env/dist/etc/modules/playerbot_agent.conf` 控制：`AgentPlayerbot.AnchorBotAutologin = 1`、`AgentPlayerbot.AnchorBotName = "瓦小狸"`、`AgentPlayerbot.AnchorBotAliases = "小狸"`。它不依赖 `AiPlayerbot.RandomBotAutologin`，bridge 会按 `AgentPlayerbot.AnchorBotEnsureIntervalMs` 周期确认瓦小狸在线；如果瓦小狸离玩家太远导致 `/s` 不可见，回复会回退为 whisper。
 

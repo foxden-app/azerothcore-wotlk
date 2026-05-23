@@ -226,10 +226,95 @@ class CommonTests(unittest.TestCase):
         event = {"channel": "say", "speaker_guid": 10, "bot_guid": None, "group_leader_guid": None}
         self.assertEqual(hermes_relay.conversation_for(event), "wow-player-10")
 
+    def test_conversation_for_anchor_say_is_speaker_scoped(self):
+        event = {
+            "channel": "say",
+            "speaker_guid": 10,
+            "bot_guid": None,
+            "group_leader_guid": 99,
+            "message": "瓦小狸，帮我看看",
+        }
+        self.assertEqual(hermes_relay.conversation_for(event), "wow-anchor-10")
+
     def test_conversation_for_adds_epoch_when_configured(self):
         event = {"channel": "whisper", "speaker_guid": 10, "bot_guid": 20, "group_leader_guid": 99}
         with patch.dict("os.environ", {"PLAYERBOT_HERMES_CONVERSATION_EPOCH": "gjzn-20260523"}):
             self.assertEqual(hermes_relay.conversation_for(event), "wow-whisper-10-20-gjzn-20260523")
+
+    def test_speaker_is_allowed_by_name_guid_or_account(self):
+        event = {"speaker_name": "Wuya", "speaker_guid": 556, "speaker_account": 1}
+        self.assertTrue(hermes_relay.speaker_is_allowed(event))
+        with patch.dict(
+            "os.environ",
+            {
+                "PLAYERBOT_HERMES_ALLOWED_PLAYER_NAMES": "",
+                "PLAYERBOT_HERMES_ALLOWED_PLAYER_GUIDS": "556",
+                "PLAYERBOT_HERMES_ALLOWED_ACCOUNTS": "",
+                "PLAYERBOT_HERMES_ALLOW_ALL_PLAYERS": "0",
+            },
+        ):
+            self.assertTrue(hermes_relay.speaker_is_allowed(event))
+        with patch.dict(
+            "os.environ",
+            {
+                "PLAYERBOT_HERMES_ALLOWED_PLAYER_NAMES": "",
+                "PLAYERBOT_HERMES_ALLOWED_PLAYER_GUIDS": "",
+                "PLAYERBOT_HERMES_ALLOWED_ACCOUNTS": "1",
+                "PLAYERBOT_HERMES_ALLOW_ALL_PLAYERS": "0",
+            },
+        ):
+            self.assertTrue(hermes_relay.speaker_is_allowed(event))
+        with patch.dict(
+            "os.environ",
+            {
+                "PLAYERBOT_HERMES_ALLOWED_PLAYER_NAMES": "Other",
+                "PLAYERBOT_HERMES_ALLOWED_PLAYER_GUIDS": "",
+                "PLAYERBOT_HERMES_ALLOWED_ACCOUNTS": "",
+                "PLAYERBOT_HERMES_ALLOW_ALL_PLAYERS": "0",
+            },
+        ):
+            self.assertFalse(hermes_relay.speaker_is_allowed(event))
+
+    def test_unauthorized_event_does_not_call_hermes(self):
+        class FakeDb:
+            def scalar_int(self, sql):
+                return 0
+
+        class FakeClient:
+            def send_event(self, **kwargs):
+                raise AssertionError("unauthorized event should not reach Hermes")
+
+        event = {
+            "id": 88,
+            "channel": "whisper",
+            "speaker_guid": 999,
+            "speaker_account": 9,
+            "speaker_name": "Stranger",
+            "bot_guid": 20,
+            "bot_name": "瓦小狸",
+            "group_leader_guid": 999,
+            "message": "瓦小狸，帮我叫队友上线",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            relay = hermes_relay.Relay(FakeDb(), FakeClient(), pathlib.Path(tmp) / "state.json")
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "PLAYERBOT_HERMES_ALLOWED_PLAYER_NAMES": "Wuya",
+                        "PLAYERBOT_HERMES_ALLOWED_PLAYER_GUIDS": "",
+                        "PLAYERBOT_HERMES_ALLOWED_ACCOUNTS": "",
+                        "PLAYERBOT_HERMES_ALLOW_ALL_PLAYERS": "0",
+                    },
+                ),
+                patch("hermes_relay.log_event") as log_event,
+                patch("hermes_relay.enqueue_action") as enqueue,
+            ):
+                relay.handle_event(event)
+
+            enqueue.assert_not_called()
+            self.assertEqual(log_event.call_args.args[0], "relay_event_unauthorized")
 
     def test_simple_social_reply_text(self):
         self.assertEqual(hermes_relay.simple_social_reply_text("晚上好"), "晚上好，我在。")

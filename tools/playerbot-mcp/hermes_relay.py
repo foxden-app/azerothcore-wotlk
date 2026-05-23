@@ -264,13 +264,15 @@ def default_conversation_epoch() -> str:
 
 
 def base_conversation_for(event: dict[str, Any]) -> str:
-    channel = str(event.get("channel") or "")
+    channel = str(event.get("channel") or "").strip().lower()
     speaker_guid = int(event.get("speaker_guid") or 0)
     bot_guid = int(event.get("bot_guid") or 0)
     leader_guid = int(event.get("group_leader_guid") or 0)
 
     if channel == "whisper" and bot_guid:
         return f"wow-whisper-{speaker_guid}-{bot_guid}"
+    if channel in {"say", "yell"} and message_addresses_anchor(str(event.get("message") or "")):
+        return f"wow-anchor-{speaker_guid}"
     if leader_guid:
         return f"wow-party-{leader_guid}"
     return f"wow-player-{speaker_guid}"
@@ -301,6 +303,16 @@ def split_config_list(value: str) -> list[str]:
     return [item.strip() for item in value.replace(";", ",").split(",") if item.strip()]
 
 
+def split_config_ints(value: str) -> set[int]:
+    result: set[int] = set()
+    for item in split_config_list(value):
+        try:
+            result.add(int(item))
+        except ValueError:
+            continue
+    return result
+
+
 def anchor_bot_name() -> str:
     return os.getenv("PLAYERBOT_AGENT_ANCHOR_BOT_NAME", ANCHOR_BOT_DEFAULT_NAME).strip()
 
@@ -315,6 +327,39 @@ def message_addresses_anchor(message: str) -> bool:
     if not text:
         return False
     return any(alias.lower() in text for alias in anchor_bot_aliases())
+
+
+def configured_allowed_player_names() -> set[str]:
+    raw = os.getenv("PLAYERBOT_HERMES_ALLOWED_PLAYER_NAMES", "Wuya")
+    return {item.lower() for item in split_config_list(raw)}
+
+
+def configured_allowed_player_guids() -> set[int]:
+    return split_config_ints(os.getenv("PLAYERBOT_HERMES_ALLOWED_PLAYER_GUIDS", ""))
+
+
+def configured_allowed_accounts() -> set[int]:
+    return split_config_ints(os.getenv("PLAYERBOT_HERMES_ALLOWED_ACCOUNTS", ""))
+
+
+def speaker_is_allowed(event: dict[str, Any]) -> bool:
+    if env_bool("PLAYERBOT_HERMES_ALLOW_ALL_PLAYERS", False):
+        return True
+
+    names = configured_allowed_player_names()
+    guids = configured_allowed_player_guids()
+    accounts = configured_allowed_accounts()
+    if "*" in names:
+        return True
+
+    speaker_name = str(event.get("speaker_name") or "").strip().lower()
+    speaker_guid = int(event.get("speaker_guid") or 0)
+    speaker_account = int(event.get("speaker_account") or 0)
+    return (
+        bool(speaker_name and speaker_name in names)
+        or bool(speaker_guid and speaker_guid in guids)
+        or bool(speaker_account and speaker_account in accounts)
+    )
 
 
 def is_quest_progress_noise(message: str) -> bool:
@@ -749,7 +794,6 @@ class Relay:
 
     def handle_event(self, event: dict[str, Any]) -> None:
         conversation = self.conversation_for_event(event)
-        action_results = fetch_action_results(self.db, int(event["id"]), limit=8)
         skip, skip_reason = should_skip_event(event)
         if skip:
             log_event(
@@ -761,6 +805,18 @@ class Relay:
                 message=event["message"],
                 reason=skip_reason,
                 anchor_aliases=anchor_bot_aliases(),
+            )
+            return
+        if not speaker_is_allowed(event):
+            log_event(
+                "relay_event_unauthorized",
+                event_id=event["id"],
+                conversation=conversation,
+                channel=event["channel"],
+                speaker=event["speaker_name"],
+                speaker_guid=event.get("speaker_guid"),
+                speaker_account=event.get("speaker_account"),
+                message=event["message"],
             )
             return
         if self.try_handle_context_control(event):
@@ -779,6 +835,7 @@ class Relay:
             speaker=event["speaker_name"],
             message=event["message"],
         )
+        action_results = fetch_action_results(self.db, int(event["id"]), limit=8)
         self.client.send_event(conversation=conversation, event=event, action_results=action_results)
         settled_results = self.wait_for_action_results(int(event["id"]))
         self.ensure_visible_reply(event, settled_results)

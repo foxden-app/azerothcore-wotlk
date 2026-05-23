@@ -59,6 +59,8 @@ If investigating a player report like “瓦小狸不说话”:
 5. If relay reaches Hermes but Hermes returns `HTTP 402: Insufficient Balance`, the game/MCP path is up and the model provider balance/key must be fixed.
 6. Keep production resource use low: `PLAYERBOT_HERMES_STORE=0`, `PLAYERBOT_HERMES_TRACE_RAW=0`, and a current `PLAYERBOT_HERMES_CONVERSATION_EPOCH` should be set on GJZN. Pure greetings/thanks, consumables, offline-party wakeups, and in-game context reset commands use relay fast-paths and should not call Hermes.
 7. Players can tell 瓦小狸 “新建会话 / 重置上下文 / 清空上下文 / 压缩上下文” from WoW. Relay should rotate the current conversation epoch directly; “压缩上下文” currently means “start a new Hermes conversation” until Hermes has a reliable summary-writeback API.
+8. 瓦小狸入口 is whitelist-gated in relay. Production should keep `PLAYERBOT_HERMES_ALLOW_ALL_PLAYERS=0`; add trusted characters through `PLAYERBOT_HERMES_ALLOWED_PLAYER_NAMES`, `PLAYERBOT_HERMES_ALLOWED_PLAYER_GUIDS`, or `PLAYERBOT_HERMES_ALLOWED_ACCOUNTS`. Unauthorized events should log `relay_event_unauthorized` and must not call Hermes or enqueue actions.
+9. Direct conversations with 瓦小狸 are speaker-GUID scoped for whisper and addressed say/yell; party/raid remains group-scoped by design.
 
 Talent and GM-operation truth:
 
@@ -177,7 +179,7 @@ Cloud docs are part of the operating surface because teammates read there. When 
 - Folder: `AzerothCore PlayerBot RT 文档`
 - Folder URL: `https://docs.qq.com/desktop/mydoc/folder/dCqgFyBeqUwT`
 - Cloud architecture doc: `https://docs.qq.com/doc/DZFVEZWVnU0hyb1ZS`
-- Runtime README: `https://docs.qq.com/doc/DZFZTVkhMYXhtY2tS`
+- Runtime README: `https://docs.qq.com/doc/DZHBQSVZ2enp0TFFj`
 - RT runbook: `https://docs.qq.com/doc/DZEpTcUdvWWtiVWtE`
 - GJZN runbook: `https://docs.qq.com/doc/DZFFKWFpMa2pVeHpT`
 - Agent README: `https://docs.qq.com/markdown/DZERueEhFekd1aFR2`
