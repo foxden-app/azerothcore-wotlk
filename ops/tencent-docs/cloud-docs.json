@@ -40,12 +40,12 @@
       "key": "gjzn-runbook",
       "title": "GJZN-bootstrap-runbook",
       "source": "ops/gjzn-bootstrap/README.md",
-      "file_id": "dHdXDPybwpqW",
-      "url": "https://docs.qq.com/doc/DZEhkWERQeWJ3cHFX",
+      "file_id": "dtyKBLyDBrrT",
+      "url": "https://docs.qq.com/doc/DZHR5S0JMeURCcnJU",
       "sync": {
         "mode": "doc_from_markdown"
       },
-      "last_synced_at": "2026-05-23T20:35:29+08:00"
+      "last_synced_at": "2026-05-23T20:40:52+08:00"
     },
     {
       "key": "agent-readme",

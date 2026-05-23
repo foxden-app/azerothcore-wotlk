@@ -56,6 +56,14 @@ ssh GJZN 'free -h && swapon --show && df -h /'
 ssh GJZN 'docker info | egrep "HTTP Proxy|HTTPS Proxy|No Proxy"'
 ```
 
+2026-05-23 已做首次重启验证：
+
+- SSH 自动恢复。
+- `docker.service`、`xray.service` 自动恢复；刚能 SSH 进去时可能还在启动，等几十秒后复查即可。
+- Xray 端口 `127.0.0.1:20170` / `127.0.0.1:20171` 自动监听。
+- Docker 能运行容器。
+- git 能通过本机代理 `fetch` GitHub。
+
 ## 代理与 Docker 拉取
 
 T490 关机前已把代理配置备份到本地私有目录：
@@ -164,6 +172,5 @@ Advanced Mode -> Advanced -> APM -> Restore AC Power Loss = Power On
 
 1. 处理第二条内存无法启动的问题，目标至少 8GB。
 2. 接有线网并固定 DHCP 或静态地址。
-3. 首次重启后验证 `ssh/docker/xray` 自动恢复。
-4. 建立本机 CMake build cache，不要从 RT 或旧开发机拷 build 目录。
-5. 如果要做热备，再设计 RT -> GJZN 的数据库备份、运行产物同步和明确的人工切换流程。
+3. 建立本机 CMake build cache，不要从 RT 或旧开发机拷 build 目录。
+4. 如果要做热备，再设计 RT -> GJZN 的数据库备份、运行产物同步和明确的人工切换流程。
