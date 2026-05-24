@@ -1,4 +1,4 @@
 interface:
   display_name: "AzerothCore PlayerBot Ops"
-  short_description: "Operate, debug, build, deploy, document, commit, and push the RT PlayerBot stack"
-  default_prompt: "Check RT production status, troubleshoot 瓦小狸/MCP/Hermes relay issues, deploy sidecars or world binaries safely, update architecture truth docs, and commit with a Chinese message before pushing."
+  short_description: "Operate, debug, deploy, and grant starter gifts for the GJZN PlayerBot stack"
+  default_prompt: "Check GJZN production status, troubleshoot 瓦小狸/MCP/Hermes relay issues, grant new-player starter gifts through SOAP GM mail, deploy sidecars or world binaries safely, update architecture truth docs, and commit with a Chinese message before pushing."

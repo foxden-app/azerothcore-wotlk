@@ -1,6 +1,6 @@
 ---
 name: azerothcore-playerbot-ops
-description: Operate, debug, build, deploy, document, commit, and push the AzerothCore WotLK PlayerBot/Hermes stack. Use when working on GJZN production, RT legacy rollback, local dev builds, MCP/Hermes relay sidecars, 瓦小狸/playerbot behavior, realmlist lines, systemd/container health, architecture truth docs, Chinese commit messages, or routine compile/deploy/restart troubleshooting.
+description: Operate, debug, build, deploy, document, commit, and push the AzerothCore WotLK PlayerBot/Hermes stack. Use when working on GJZN production, RT legacy rollback, local dev builds, MCP/Hermes relay sidecars, 瓦小狸/playerbot behavior, new-player starter gifts, heirloom/GM mail grants, realmlist lines, systemd/container health, architecture truth docs, Chinese commit messages, or routine compile/deploy/restart troubleshooting.
 ---
 
 # AzerothCore PlayerBot Ops
@@ -87,6 +87,57 @@ ssh GJZN 'MYSQL_PWD=acore mysql -uacore -h127.0.0.1 -e "
   FROM acore_playerbot_characters.characters
   WHERE name IN (\"瓦小狸\",\"小德\",\"Wuya\")
   ORDER BY name;
+"'
+```
+
+## New Player Starter Gifts
+
+Use worldserver SOAP GM commands for starter gifts, especially when the player is online. Do not write `characters`, `mail`, `mail_items`, or `item_instance` directly unless SOAP is unavailable and the player is offline or has logged out.
+
+Before granting anything, query the target character and confirm class, faction, level, current money, and online state. Replace `火球树` with the actual character name:
+
+```bash
+ssh GJZN 'MYSQL_PWD=acore mysql -uacore -h127.0.0.1 -N -B -e "
+  SELECT c.guid,c.name,c.race,c.class,c.level,c.money,c.online,c.account,a.username
+  FROM acore_playerbot_characters.characters c
+  LEFT JOIN acore_auth.account a ON a.id=c.account
+  WHERE c.name=\"火球树\";
+"'
+```
+
+Known starter gift baseline:
+
+- 4x `23162` 弗洛尔的无尽抗性宝箱. This container is non-stackable, so `send items ... 23162:4` becomes four mail attachments.
+- 100 gold startup funds = `1000000` copper.
+- For a level-1 alliance mage/caster, use `42947` 高贵的院长之杖, `42985` 褴褛的鬼雾衬肩, `48691` 破烂的鬼雾长袍, `42992` 敏锐的比斯巨兽之眼, and `44098` 家传的联盟徽记. For horde, use `44097` 家传的部落徽记 instead of `44098`.
+- For other classes, first search `item_template` where `Quality=7` and choose class-appropriate heirlooms by armor/weapon role. Do not guess from the player name.
+
+Grant the starter gift through the existing SOAP helper on GJZN. Keep the GM password in `/home/wuya/.config/acore/gm.env` and do not print it:
+
+```bash
+ssh GJZN 'set -a; . /home/wuya/.config/acore/gm.env; set +a; /home/wuya/git/azerothcore-wotlk-git/ops/codex-skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh gm '\''send items 火球树 "新手礼包：法师传家宝" "欢迎来到艾泽拉斯。这封邮件包含法师传家宝、联盟徽记和4个弗洛尔的无尽抗性宝箱。" 42947 42985 48691 42992 44098 23162:4'\'''
+ssh GJZN 'set -a; . /home/wuya/.config/acore/gm.env; set +a; /home/wuya/git/azerothcore-wotlk-git/ops/codex-skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh gm '\''send money 火球树 "新手礼包：启动资金" "这是给新角色的100金启动资金。" 1000000'\'''
+```
+
+Verify with both the GM mail view and a narrow SQL check:
+
+```bash
+ssh GJZN 'set -a; . /home/wuya/.config/acore/gm.env; set +a; /home/wuya/git/azerothcore-wotlk-git/ops/codex-skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh gm '\''mail list 火球树'\'''
+ssh GJZN 'MYSQL_PWD=acore mysql -uacore -h127.0.0.1 -t -e "
+  SELECT m.id,m.subject,m.has_items,m.money,FROM_UNIXTIME(m.deliver_time) AS deliver_at
+  FROM acore_playerbot_characters.mail m
+  JOIN acore_playerbot_characters.characters c ON c.guid=m.receiver
+  WHERE c.name=\"火球树\"
+  ORDER BY m.id DESC LIMIT 6;
+  SELECT mi.mail_id,ii.itemEntry,COALESCE(NULLIF(l.Name,\"\"),t.name) AS item_name,ii.count,mi.item_guid
+  FROM acore_playerbot_characters.mail_items mi
+  JOIN acore_playerbot_characters.characters c ON c.guid=mi.receiver
+  JOIN acore_playerbot_characters.item_instance ii ON ii.guid=mi.item_guid
+  JOIN acore_playerbot_world.item_template t ON t.entry=ii.itemEntry
+  LEFT JOIN acore_playerbot_world.item_template_locale l ON l.ID=t.entry AND l.locale=\"zhCN\"
+  WHERE c.name=\"火球树\"
+  ORDER BY mi.mail_id DESC,ii.itemEntry,mi.item_guid
+  LIMIT 20;
 "'
 ```
 
