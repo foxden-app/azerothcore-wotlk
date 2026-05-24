@@ -41,6 +41,23 @@ rsync -az --delete --exclude='.git/' \
 - 容器：`hermes-wow`
 - systemd 侧车：`azerothcore-playerbot-mcp.service`、`azerothcore-playerbot-hermes-relay.service`、`azerothcore-account-register.service`
 
+## 生产网络与代理边界
+
+魔兽生产链路不走代理：`authserver`、`worldserver`、FRP 游戏线路不继承 `HTTP_PROXY`、`HTTPS_PROXY` 或 `ALL_PROXY`。GJZN 现在走有线 `eno1`，LAN 地址 `192.168.1.203`。
+
+RT 负责统一国外网络代理：
+
+- HTTP：`192.168.1.179:20171`
+- SOCKS：`192.168.1.179:20170`
+
+GJZN 上需要国外网络的 foxclaw/Codex 走 RT 代理：
+
+- `/home/wuya/.foxclaw/.env` 配置 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 指向 RT。
+- `/home/wuya/.config/systemd/user/foxclaw.service.d/10-rt-proxychains.conf` 用 `proxychains4` 包住 foxclaw，覆盖 Telegram Node `https.request` 不读取代理变量的问题。
+- `/home/wuya/.proxychains-rt.conf` 是 RT SOCKS 代理配置，并绕过 `127.0.0.1` 和内网地址。
+
+GJZN 本机 `xray.service` 保留为备用，监听 `127.0.0.1:20170/20171`，不作为默认路径。GJZN WARP 不应参与魔兽游戏链路；如果需要国外网络，优先让具体工具走 RT 代理。
+
 端口：
 
 - 共享 authserver：`3724`
@@ -65,7 +82,7 @@ Realm：
 
 ## 当前调优
 
-GJZN 现在按“可控 AddClass 小队优先、随机世界 bot 关闭”的低负载模式跑。AddClass bot 用于组队控制；随机世界 bot 能力保留，但 8GB 内存和 WiFi 生产网络仍不适合默认开 30-50 个随机 bot。
+GJZN 现在按“可控 AddClass 小队优先、随机世界 bot 关闭”的低负载模式跑。AddClass bot 用于组队控制；随机世界 bot 能力保留，但 8GB 内存余量仍不适合默认开 30-50 个随机 bot。
 
 关键配置：
 

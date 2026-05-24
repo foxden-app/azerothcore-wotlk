@@ -1,13 +1,13 @@
 # GJZN 初始化与运营记录
 
-更新时间：2026-05-23
+更新时间：2026-05-24
 
 GJZN（龟机智能）是新的 i7 机器。2026-05-23 已从 RT 接管 AzerothCore PlayerBot 生产服：auth/world 原生 systemd 运行，Hermes 用 Docker 容器，MCP/relay/注册页用 systemd，公网游戏入口通过 FRP 转发到 GJZN。
 
 ## 主机信息
 
 - SSH：`ssh GJZN`
-- LAN SSH：`ssh GJZN`，当前地址 `192.168.1.248`
+- LAN SSH：`ssh GJZN`，当前地址 `192.168.1.203`
 - 公网 SSH：`ssh GJZN-public`，`38.207.189.99:8026`
 - 用户：`wuya`
 - sudo：免密 sudo 已验证
@@ -18,13 +18,13 @@ GJZN（龟机智能）是新的 i7 机器。2026-05-23 已从 RT 接管 AzerothC
 - 内存：8GB DDR3，实际可用约 7.7GiB
 - 交换分区：`/swap.img`，16GB
 - 根分区：约 110GB，迁服后剩余约 60GB
-- 当前网络：WiFi `wlp6s0`，连接 `CMCC-AU2A`，已启用 autoconnect
+- 当前网络：有线 `eno1`，地址 `192.168.1.203`。WiFi `CMCC-AU2A` 已断开并禁用 autoconnect。
 
 本地 SSH alias 记录在开发机的 `~/.ssh/config`：
 
 ```sshconfig
 Host GJZN
-    HostName 192.168.1.248
+    HostName 192.168.1.203
     Port 22
     User wuya
     ControlMaster auto
@@ -88,7 +88,7 @@ GJZN 已按无图形服务器方式配置：
 - 默认 target：`multi-user.target`
 - display manager：已停止/禁用；当前服务不存在或 inactive
 - 睡眠/休眠：`sleep.target`、`suspend.target`、`hibernate.target`、`hybrid-sleep.target` 已 mask
-- 开机自启：`ssh`、`docker`、`xray`、`mysql`、AzerothCore 生产服务、FRP 游戏服务
+- 开机自启：`ssh`、`docker`、`mysql`、AzerothCore 生产服务、FRP 游戏服务、GJZN 本机 `xray` 备用代理
 - Docker：已安装并启用，`wuya` 已加入 `docker` 组
 - Docker Compose：`docker compose version` 可用
 - ccache：已设置 20GB 上限
@@ -107,8 +107,8 @@ ssh GJZN 'docker info | egrep "HTTP Proxy|HTTPS Proxy|No Proxy"'
 2026-05-23 已做首次重启验证：
 
 - SSH 自动恢复。
-- `docker.service`、`xray.service` 自动恢复；刚能 SSH 进去时可能还在启动，等几十秒后复查即可。
-- Xray 端口 `127.0.0.1:20170` / `127.0.0.1:20171` 自动监听。
+- `docker.service`、GJZN 本机 `xray.service` 自动恢复；刚能 SSH 进去时可能还在启动，等几十秒后复查即可。
+- GJZN 本机 Xray 端口 `127.0.0.1:20170` / `127.0.0.1:20171` 自动监听，仅作为 RT 统一代理故障时的备用。
 - Docker 能运行容器。
 - git 能通过本机代理 `fetch` GitHub。
 
@@ -122,39 +122,48 @@ var/private/t490-proxy-backup-20260523-174422/
 
 该目录不提交到 git。里面包含 Xray 配置、原 Docker 代理 drop-in 和排障快照。
 
-GJZN 已从这份备份恢复本机 Xray：
+生产代理边界：
+
+- 魔兽 `authserver`、`worldserver`、FRP 游戏线路不走代理，不继承 `HTTP_PROXY`、`HTTPS_PROXY` 或 `ALL_PROXY`。
+- RT 是统一网络代理入口，Xray 监听 `192.168.1.179:20170` SOCKS 和 `192.168.1.179:20171` HTTP。
+- GJZN 的 foxclaw/Codex 走 RT 代理：`/home/wuya/.foxclaw/.env` 指向 RT，`foxclaw.service` 通过 user drop-in `/home/wuya/.config/systemd/user/foxclaw.service.d/10-rt-proxychains.conf` 包一层 `proxychains4`，让 Telegram 的 Node `https.request` 也能走 RT。
+- GJZN 本机 Xray 保留为备用，不作为默认路径。GJZN WARP 不应参与魔兽游戏链路；需要国外网络时优先使用 RT 代理或 GJZN 本机 Xray 备用。
+
+GJZN 已从这份备份恢复本机 Xray 备用：
 
 - Xray 配置：`/home/wuya/.xray/config.json`
-- HTTP 代理：`127.0.0.1:20171`
-- SOCKS 代理：`127.0.0.1:20170`
+- 备用 HTTP 代理：`127.0.0.1:20171`
+- 备用 SOCKS 代理：`127.0.0.1:20170`
 - systemd unit：`xray.service`
 - Docker daemon 代理 drop-in：`/etc/systemd/system/docker.service.d/http-proxy.conf`
 
-Docker 当前通过本机 HTTP 代理拉取外部镜像：
+foxclaw/Codex 当前通过 RT 代理访问国外网络：
 
 ```text
-HTTP_PROXY=http://127.0.0.1:20171
-HTTPS_PROXY=http://127.0.0.1:20171
+HTTP_PROXY=http://192.168.1.179:20171
+HTTPS_PROXY=http://192.168.1.179:20171
+ALL_PROXY=socks5://192.168.1.179:20170
 NO_PROXY=localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
 ```
 
-GJZN 的 `wuya` 用户也已配置 git 走同一个 HTTP 代理，否则直接 `git fetch` GitHub 会超时：
+GJZN 的 `wuya` 交互 shell 可以按需配置代理；不要把这些代理变量导入 systemd 全局环境。服务类按需配置，魔兽/FRP 不配置代理。
+
+GJZN 的 `wuya` 用户曾配置 git 走 HTTP 代理，否则直接 `git fetch` GitHub 可能超时。当前推荐优先指向 RT 代理：
 
 ```bash
-git config --global http.proxy http://127.0.0.1:20171
-git config --global https.proxy http://127.0.0.1:20171
+git config --global http.proxy http://192.168.1.179:20171
+git config --global https.proxy http://192.168.1.179:20171
 ```
 
 已验证：
 
 ```bash
-ssh GJZN 'curl -fsS -x http://127.0.0.1:20171 https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name'
+ssh GJZN 'curl -I -x http://192.168.1.179:20171 https://api.openai.com/v1/models'
+ssh GJZN 'proxychains4 -f /home/wuya/.proxychains-rt.conf curl -I https://api.telegram.org'
 ssh GJZN 'git -C /home/wuya/git/azerothcore-wotlk-git fetch foxden-app playerbot-agent'
-ssh GJZN 'docker pull hello-world'
-ssh GJZN 'docker run --rm hello-world'
 ```
 
-不要把 `/home/wuya/.xray/config.json`、订阅信息、token、代理节点或任何密钥写进仓库。
+不要把 `/home/wuya/.xray/config.json`、订阅信息、token、代理节点、foxclaw `.env` 或任何密钥写进仓库。
 
 ## 构建环境
 
@@ -224,7 +233,7 @@ Advanced Mode -> Advanced -> APM -> Restore AC Power Loss = Power On
 
 如果有 `ErP Ready`，生产/远程机器建议关闭，否则可能影响断电恢复、USB 或网络唤醒。
 
-当前活跃网络是 WiFi。Wake-on-LAN 一般只适用于有线网卡；如果 GJZN 后续作为生产或热备机器，建议接有线网。
+当前活跃网络是有线 `eno1`。Wake-on-LAN 一般只适用于有线网卡；如需远程唤醒，再在 BIOS 和网卡侧单独打开 WOL。
 
 ## 后续动作
 

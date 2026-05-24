@@ -11,13 +11,17 @@ GJZN is production. The development machine is for editing, testing, building, a
 
 Production shape:
 
-- GJZN LAN SSH: `ssh GJZN` / `wuya@192.168.1.248`.
+- GJZN LAN SSH: `ssh GJZN` / `wuya@192.168.1.203`.
 - GJZN public SSH: `ssh GJZN-public` / `wuya@38.207.189.99 -p 8026`.
 - GJZN runtime root: `/home/wuya/git/azerothcore-wotlk-git`.
 - GJZN runs `azerothcore-auth.service` and `azerothcore-world.service` natively under systemd.
 - GJZN runs `hermes-wow` as a Docker container from `/home/wuya/srv/hermes-wow/docker-compose.yml`.
 - GJZN runs MCP, Hermes relay, and account register as systemd services.
 - GJZN runs public game FRP with `frpc-acore-main.service` and `frpc-chml-unicom.service`.
+- GJZN uses wired `eno1` for production. WiFi autoconnect is disabled.
+- RT is the default foreign-network proxy for GJZN tools: HTTP `192.168.1.179:20171`, SOCKS `192.168.1.179:20170`.
+- GJZN foxclaw/Codex uses `/home/wuya/.foxclaw/.env` plus `/home/wuya/.config/systemd/user/foxclaw.service.d/10-rt-proxychains.conf` to route Telegram and Codex traffic through RT. GJZN local `xray.service` remains only as fallback on `127.0.0.1:20170/20171`.
+- AzerothCore auth/world and game FRP services do not use proxy env vars. Do not import proxy variables into systemd global environment.
 - Public realms: `线路一 -> 38.207.189.99:8085`, `线路二 -> 8.162.5.68:8085`.
 - Auth alias: `RealmList.RealmIDAliases = "2:1"`; both realms point to the same worldserver.
 - Production DBs on GJZN MySQL: `acore_auth`, `acore_playerbot_world`, `acore_playerbot_characters`, `acore_playerbots`.
@@ -199,13 +203,16 @@ rsync -a --delete ops/codex-skills/azerothcore-playerbot-ops/ "$CODEX_HOME_DIR/s
 
 ## Commit And Push
 
-When the user asks to commit this stack:
+Default to committing and pushing repo-tracked work after completing this stack, unless the user explicitly says not to commit, asks to pause, or the change is only a live machine/runtime-only operation with no repo files modified. This includes docs, Tencent Docs manifest updates, runbooks, skill updates, sidecar code, tests, deployment scripts, and architecture truth changes.
+
+When committing this stack:
 
 1. Inspect status and diffs; never revert unrelated user changes.
 2. Run relevant tests. For Python sidecar changes, run local syntax checks and RT venv unit tests after deploy. For C++ changes, compile/deploy when build artifacts exist; otherwise state the blocker.
 3. Run `git diff --check`.
 4. Use a Chinese commit message.
-5. In detached HEAD on this repo, push explicitly to `foxden-app`:
+5. Stage only intentional files with explicit paths; do not use broad staging if unrelated changes exist.
+6. In detached HEAD on this repo, push explicitly to `foxden-app`:
 
 ```bash
 git add <files>
