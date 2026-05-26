@@ -254,7 +254,13 @@ rsync -a --delete ops/codex-skills/azerothcore-playerbot-ops/ "$CODEX_HOME_DIR/s
 
 ## Commit And Push
 
-Default to committing and pushing repo-tracked work after completing this stack, unless the user explicitly says not to commit, asks to pause, or the change is only a live machine/runtime-only operation with no repo files modified. This includes docs, Tencent Docs manifest updates, runbooks, skill updates, sidecar code, tests, deployment scripts, and architecture truth changes.
+Every completed production or operations task for this stack has a required close-out unless the user explicitly says not to publish or asks to pause:
+
+1. Update the durable documentation owned by the affected system. Live-machine changes still require a factual doc/runbook update. When the operational truth lives in a companion documentation repo such as `reinstall-memo`, update that repo instead of duplicating it here.
+2. Commit only intentional tracked changes, using a Chinese commit message.
+3. Push each modified repository to its intended remote/branch and report the pushed commit.
+
+Do not treat a runtime-only operation as a reason to skip documentation, Chinese commit text, or push when it changes production topology, configuration, monitoring, or a reusable repair procedure. This includes docs, Tencent Docs manifest updates, runbooks, skill updates, sidecar code, tests, deployment scripts, and architecture truth changes.
 
 When committing this stack:
 
