@@ -7,12 +7,13 @@ description: Operate, debug, build, deploy, document, commit, and push the Azero
 
 ## Current Truth
 
-GJZN is production. The development machine is for editing, testing, building, and publishing. Do not restart or resurrect T490/local worldserver as production unless the user explicitly asks. Do not deploy to RT as production unless the user explicitly asks for rollback.
+GJZN is production and the primary development host. Keep development and production paths separate: edit, test, and build in `/home/wuya/git/azerothcore-wotlk-dev`, then deploy explicitly to the production runtime tree. Do not develop directly in the production runtime tree unless the user explicitly asks for a hotfix there. Do not restart or resurrect T490/local worldserver as production unless the user explicitly asks. Do not deploy to RT as production unless the user explicitly asks for rollback.
 
 Production shape:
 
-- GJZN LAN SSH: `ssh GJZN` / `wuya@192.168.1.203`.
-- GJZN public SSH: `ssh GJZN-public` / `wuya@38.207.189.99 -p 8026`.
+- GJZN LAN SSH: `ssh GJZN-local` / `wuya@192.168.1.203`. Use this for repo/skill syncs and large transfers when on the LAN.
+- GJZN public SSH: `ssh GJZN` or `ssh GJZN-public` / `wuya@38.207.189.99 -p 8026`.
+- GJZN development root: `/home/wuya/git/azerothcore-wotlk-dev`.
 - GJZN runtime root: `/home/wuya/git/azerothcore-wotlk-git`.
 - GJZN runs `azerothcore-auth.service` and `azerothcore-world.service` natively under systemd.
 - GJZN runs `hermes-wow` as a Docker container from `/home/wuya/srv/hermes-wow/docker-compose.yml`.
@@ -61,10 +62,10 @@ If investigating a player report like “瓦小狸不说话”:
 3. Confirm the reporter is online before expecting replies or bot actions; old offline events often fail with `requester is not online`.
 4. If stale events accumulated while relay was broken, mark only those stale rows processed and advance relay state to the latest event, then restart the relay.
 5. If relay reaches Hermes but Hermes returns `HTTP 402: Insufficient Balance`, the game/MCP path is up and the model provider balance/key must be fixed.
-6. Keep production resource use low: `PLAYERBOT_HERMES_STORE=0`, `PLAYERBOT_HERMES_TRACE_RAW=0`, and a current `PLAYERBOT_HERMES_CONVERSATION_EPOCH` should be set on GJZN. Pure greetings/thanks, consumables, offline-party wakeups, and in-game context reset commands use relay fast-paths and should not call Hermes.
+6. Keep production resource use low: `PLAYERBOT_HERMES_STORE=0`, `PLAYERBOT_HERMES_TRACE_RAW=0`, `PLAYERBOT_HERMES_LISTEN_SCOPE=direct`, `PLAYERBOT_HERMES_PAYLOAD_MODE=minimal`, and a current `PLAYERBOT_HERMES_CONVERSATION_EPOCH` should be set on GJZN. Pure greetings/thanks, consumables, offline-party wakeups, in-game context reset commands, and exact intrinsic commands such as `summon`/`follow`/`release` use relay fast-paths and should not call Hermes.
 7. Players can tell 瓦小狸 “新建会话 / 重置上下文 / 清空上下文 / 压缩上下文” from WoW. Relay should rotate the current conversation epoch directly; “压缩上下文” currently means “start a new Hermes conversation” until Hermes has a reliable summary-writeback API.
-8. 瓦小狸入口 is whitelist-gated in relay. Production should keep `PLAYERBOT_HERMES_ALLOW_ALL_PLAYERS=0`; add trusted characters through `PLAYERBOT_HERMES_ALLOWED_PLAYER_NAMES`, `PLAYERBOT_HERMES_ALLOWED_PLAYER_GUIDS`, or `PLAYERBOT_HERMES_ALLOWED_ACCOUNTS`. Unauthorized events should log `relay_event_unauthorized` and must not call Hermes or enqueue actions.
-9. Direct conversations with 瓦小狸 are speaker-GUID scoped for whisper and addressed say/yell; party/raid remains group-scoped by design.
+8. 瓦小狸入口 is whitelist-gated in relay. Production should keep `PLAYERBOT_HERMES_ALLOW_ALL_PLAYERS=0`; add trusted characters through `PLAYERBOT_HERMES_ALLOWED_PLAYER_NAMES`, `PLAYERBOT_HERMES_ALLOWED_PLAYER_GUIDS`, or `PLAYERBOT_HERMES_ALLOWED_ACCOUNTS`. Unauthorized direct events should log `relay_event_unauthorized`, reply locally with the whitelist guidance text, and must not call Hermes.
+9. Direct conversations with 瓦小狸 are speaker-GUID scoped for whisper and addressed say/yell. Production default ignores party/raid for Hermes unless `PLAYERBOT_HERMES_LISTEN_SCOPE=group` is explicitly enabled.
 
 Talent and GM-operation truth:
 

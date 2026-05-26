@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import math
 from typing import Any
@@ -21,6 +22,7 @@ from wow_common import (
     build_quest_guide_entry,
     combat_summary_has_fight,
     compact_combat_summary,
+    compact_event,
     compact_quest,
     enqueue_action,
     estimate_item_value_from_auctions,
@@ -73,6 +75,7 @@ BOT_COMMANDS = {
     "flee",
     "runaway",
     "attack",
+    "grind",
     "pull",
     "pull back",
     "ready",
@@ -80,6 +83,13 @@ BOT_COMMANDS = {
     "ll normal",
     "ll gray",
     "ll all",
+    "equip upgrade",
+    "repair",
+    "s gray",
+    "s vendor",
+    "b vendor",
+    "mail ?",
+    "mail take *",
     "focus heal clear",
 }
 ADMIN_PLAYER_NAMES_DEFAULT = ""
@@ -700,6 +710,12 @@ PLAYERBOT_COMMAND_CATALOG: list[dict[str, str]] = [
     },
     {
         "category": "小队指挥",
+        "command_line": "grind",
+        "description": "让指定可控机器人进入自主刷怪模式：不再只等主人目标，会自己找附近合适目标打。",
+        "preferred_tool": "wow_bot_grind",
+    },
+    {
+        "category": "小队指挥",
         "command_line": "pull",
         "description": "让指定机器人拉请求玩家当前目标。",
         "preferred_tool": "wow_bot_pull",
@@ -727,6 +743,18 @@ PLAYERBOT_COMMAND_CATALOG: list[dict[str, str]] = [
         "command_line": "+loot / -loot / ll normal|gray|all",
         "description": "设置拾取策略。",
         "preferred_tool": "wow_set_loot_mode",
+    },
+    {
+        "category": "维护",
+        "command_line": "equip upgrade",
+        "description": "让指定机器人把背包里更好的装备换上；不购买、不卖店。",
+        "preferred_tool": "wow_bot_equip_upgrades",
+    },
+    {
+        "category": "维护",
+        "command_line": "repair / s gray / s vendor / b vendor / mail ? / mail take *",
+        "description": "机器人经济维护：修理、卖灰、卖可卖物、在附近商人买有用装备、查看/领取邮箱。会改金币或物品，必须管理员请求。",
+        "preferred_tool": "wow_bot_maintenance",
     },
     {
         "category": "策略",
@@ -1749,8 +1777,25 @@ def event_speaker_level(event: dict[str, Any] | None) -> int:
 
 
 def payload_result(event: str, **fields: Any) -> dict[str, Any]:
-    log_event(event, **fields)
-    return {"ok": True, **fields}
+    result = {"ok": True, **fields}
+    result_size_chars = len(json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=str))
+    log_fields = dict(fields)
+    log_fields.setdefault("result_size_chars", result_size_chars)
+    log_event(event, **log_fields)
+    return result
+
+
+def recent_events_limit(limit: int, *, anchored: bool) -> int:
+    maximum = 10 if anchored else 3
+    return max(1, min(int(limit), maximum))
+
+
+def reply_channel_error_for_event(event: dict[str, Any], channel: str) -> str:
+    event_channel = str(event.get("channel") or "").strip().lower()
+    reply_channel = str(channel or "").strip().lower()
+    if event_channel == "whisper" and reply_channel != "whisper":
+        return "whisper_event_requires_whisper_reply"
+    return ""
 
 
 def clean_playerbot_command_line(command_line: str) -> str:
@@ -2186,11 +2231,81 @@ def build_mcp() -> FastMCP:
     )
 
     @mcp.tool()
-    def wow_get_recent_events(limit: int = 10, after_id: int = 0) -> dict[str, Any]:
-        """读取游戏事件队列里的最近 PlayerBot 桥接事件。"""
+    def wow_get_recent_events(
+        limit: int = 5,
+        after_id: int = 0,
+        event_id: int = 0,
+        speaker_guid: int = 0,
+        include_context: bool = False,
+    ) -> dict[str, Any]:
+        """读取压缩后的最近 PlayerBot 桥接事件；默认不返回原始游戏上下文。"""
         conn = db()
-        events = fetch_events(conn, after_id=int(after_id), limit=int(limit))
-        return payload_result("tool_recent_events", count=len(events), events=events)
+        source_event_id = int(event_id or 0)
+        query_speaker_guid = int(speaker_guid or 0)
+        query_group_leader_guid = 0
+        query_channel = ""
+        max_id = 0
+        newest_first = False
+        anchor = fetch_event(conn, source_event_id) if source_event_id else None
+        if source_event_id and not anchor:
+            return {"ok": False, "error": "event_not_found"}
+        anchored = bool(anchor)
+        bounded_limit = recent_events_limit(int(limit), anchored=anchored)
+        safe_include_context = bool(include_context) and anchored
+        scope: dict[str, Any] = {
+            "after_id": int(after_id or 0),
+            "limit": bounded_limit,
+            "anchored": anchored,
+        }
+        feedback: dict[str, Any] = {}
+        if not anchored:
+            feedback["warning"] = "recent_events_unanchored_limited"
+            feedback["next_suggestion"] = "重新调用 wow_get_recent_events(event_id=current_event_id)，按当前玩家或队伍锚定查询。"
+        if anchor:
+            anchor_channel = str(anchor.get("channel") or "")
+            max_id = source_event_id
+            scope["source_event_id"] = source_event_id
+            scope["anchor_channel"] = anchor_channel
+            if not query_speaker_guid:
+                if anchor_channel in {"party", "raid"} and int(anchor.get("group_leader_guid") or 0) > 0:
+                    query_group_leader_guid = int(anchor.get("group_leader_guid") or 0)
+                    scope["group_leader_guid"] = query_group_leader_guid
+                else:
+                    query_speaker_guid = int(anchor.get("speaker_guid") or 0)
+                    scope["speaker_guid"] = query_speaker_guid
+            if anchor_channel in {"whisper", "say", "yell"}:
+                query_channel = anchor_channel
+                scope["channel"] = query_channel
+        elif query_speaker_guid:
+            scope["speaker_guid"] = query_speaker_guid
+
+        if int(after_id or 0) <= 0:
+            newest_first = True
+
+        raw_events = fetch_events(
+            conn,
+            after_id=int(after_id or 0),
+            limit=bounded_limit,
+            max_id=max_id,
+            speaker_guid=query_speaker_guid,
+            group_leader_guid=query_group_leader_guid,
+            channel=query_channel,
+            newest_first=newest_first,
+        )
+        if newest_first:
+            raw_events = sorted(raw_events, key=lambda item: int(item.get("id") or 0))
+        events = [compact_event(event, include_context=safe_include_context) for event in raw_events]
+        payload = {
+            "count": len(events),
+            "scope": scope,
+            "compacted": True,
+            "context_omitted": not safe_include_context,
+            "events": events,
+        }
+        if feedback:
+            payload["feedback"] = feedback
+        payload["result_size_chars"] = len(json.dumps({"ok": True, **payload}, ensure_ascii=False, separators=(",", ":"), default=str))
+        return payload_result("tool_recent_events", **payload)
 
     @mcp.tool()
     def wow_get_party_state(event_id: int = 0, speaker_guid: int = 0) -> dict[str, Any]:
@@ -2770,6 +2885,15 @@ def build_mcp() -> FastMCP:
         event = fetch_event(conn, int(event_id))
         if not event:
             return {"ok": False, "error": "event_not_found"}
+        channel_error = reply_channel_error_for_event(event, channel)
+        if channel_error:
+            return {
+                "ok": False,
+                "error": channel_error,
+                "event_channel": str(event.get("channel") or ""),
+                "requested_channel": channel,
+                "required_channel": "whisper",
+            }
         requested_bot = bot_name.strip()
         speaker, speaker_reason = resolve_reply_bot_name(event, channel, requested_bot)
         if not speaker:
@@ -3100,6 +3224,80 @@ def build_mcp() -> FastMCP:
     def wow_bot_burst(event_id: int, bot_name: str = "group") -> dict[str, Any]:
         """让可控机器人执行 max dps 爆发输出指令。"""
         return enqueue_bot_command(int(event_id), bot_name=bot_name, command="max dps", default_selector="group")
+
+    @mcp.tool()
+    def wow_bot_grind(event_id: int, bot_name: str = "group") -> dict[str, Any]:
+        """让可控机器人进入自主刷怪模式；bot 会自己找附近目标打，follow 会退出 grind。"""
+        return enqueue_bot_command(int(event_id), bot_name=bot_name, command="grind", default_selector="group")
+
+    @mcp.tool()
+    def wow_bot_equip_upgrades(event_id: int, bot_name: str = "group") -> dict[str, Any]:
+        """让可控机器人装备背包里的升级装备；不购买、不卖店、不取邮件。"""
+        return enqueue_bot_command(int(event_id), bot_name=bot_name, command="equip upgrade", default_selector="group")
+
+    @mcp.tool()
+    def wow_bot_maintenance(
+        event_id: int,
+        bot_name: str = "group",
+        sell_gray: bool = False,
+        sell_vendor: bool = False,
+        repair: bool = False,
+        buy_vendor: bool = False,
+        take_mail: bool = False,
+        list_mail: bool = False,
+    ) -> dict[str, Any]:
+        """管理员工具：让可控机器人做会改变金币/物品的维护动作，例如卖灰、修理、买附近有用装备、查看或领取邮件。"""
+        requested: list[str] = []
+        if sell_gray:
+            requested.append("s gray")
+        if sell_vendor:
+            requested.append("s vendor")
+        if repair:
+            requested.append("repair")
+        if buy_vendor:
+            requested.append("b vendor")
+        if list_mail:
+            requested.append("mail ?")
+        if take_mail:
+            requested.append("mail take *")
+        if not requested:
+            return {
+                "ok": False,
+                "error": "empty_maintenance_request",
+                "allowed": ["sell_gray", "sell_vendor", "repair", "buy_vendor", "list_mail", "take_mail"],
+            }
+
+        conn = db()
+        event = fetch_event(conn, int(event_id))
+        if not event:
+            return {"ok": False, "error": "event_not_found"}
+        if not event_speaker_is_admin(event):
+            return admin_denied_payload(event, "bot_maintenance", ",".join(requested))
+
+        results: list[dict[str, Any]] = []
+        action_ids: list[int] = []
+        for command in requested:
+            result = enqueue_bot_command(
+                int(event_id),
+                bot_name=bot_name,
+                command=command,
+                default_selector="group",
+            )
+            results.append({"command": command, **result})
+            action_ids.extend(int(action_id) for action_id in result.get("action_ids", []) if action_id)
+
+        return payload_result(
+            "tool_bot_maintenance",
+            source_event_id=int(event_id),
+            bot_name=bot_name,
+            requested=requested,
+            action_ids=action_ids,
+            results=results,
+            feedback={
+                "phase": "queued",
+                "next_suggestion": "这些动作会改变金币或物品；执行结果用 wow_get_action_results 复查。",
+            },
+        )
 
     @mcp.tool()
     def wow_focus_heal(

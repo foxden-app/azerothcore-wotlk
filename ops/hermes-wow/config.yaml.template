@@ -58,6 +58,9 @@ mcp_servers:
         - wow_bot_pull
         - wow_bot_ready
         - wow_bot_burst
+        - wow_bot_grind
+        - wow_bot_equip_upgrades
+        - wow_bot_maintenance
         - wow_focus_heal
         - wow_bot_provide_consumables
         - wow_get_inventory_for_trade

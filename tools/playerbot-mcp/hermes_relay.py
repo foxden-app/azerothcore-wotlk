@@ -29,9 +29,25 @@ from wow_common import (
 
 DEFAULT_HERMES_URL = "http://192.168.1.179:8642/v1/responses"
 REPLY_CHANNELS = {"party", "raid", "say", "whisper"}
+LISTEN_SCOPES = {"whisper", "direct", "group", "all"}
+MINIMAL_EVENT_KEYS = (
+    "id",
+    "created_at",
+    "channel",
+    "speaker_guid",
+    "speaker_account",
+    "speaker_name",
+    "target_guid",
+    "target_name",
+    "bot_guid",
+    "bot_name",
+    "group_leader_guid",
+    "message",
+)
 CONTROLLED_BOT_KINDS = {"owned", "group"}
 REPLY_BOT_KINDS = {"owned", "group", "random_world", "anchor_world"}
 ANCHOR_BOT_DEFAULT_NAME = "瓦小狸"
+DEFAULT_UNAUTHORIZED_REPLY = "你好，旅行者，欢迎来到树人魔兽。如需助理服务，请联系 GM 开启白名单。"
 MAGE_CLASS_ID = 8
 CONSUMABLE_STACK_LIMIT = 5
 CONFIRM_ACTION_TYPES = {
@@ -110,21 +126,31 @@ GREETING_MESSAGES = {
     "下午好",
     "晚上好",
 }
-PING_MESSAGES = {"在吗", "你在吗", "在不在", "在么", "你在么"}
+PING_MESSAGES = {"在吗", "你在吗", "在不", "在不在", "在么", "你在么"}
 THANKS_MESSAGES = {"谢谢", "谢了", "多谢", "辛苦了", "感谢"}
+INTRINSIC_COMMANDS = {
+    "follow": "follow",
+    "summon": "summon",
+    "release": "release",
+}
 
 INSTRUCTIONS = """你是 WoW PlayerBot 队伍级 Agent。
 
-处理输入中的单个 AzerothCore 游戏事件。你可以记住当前队伍目标、玩家纠正、密语上下文和最近行动结果。
+处理输入中的单个 AzerothCore 游戏事件。relay 默认只给当前消息的最小事件包。
 
 硬规则：
 - 只通过 wow_playerbot MCP 工具观察和行动。
 - 不要调用 terminal/file/browser/任意 SQL；GM/高权限操作只能使用 MCP 明确暴露且带审计权限校验的工具，不能拼任意 GM 命令。
 - 每一轮只处理输入里 current_event_id 指定的这一个事件。所有会回复或执行动作的 MCP 调用都必须传 current_event_id；不要沿用记忆、工具历史或旧诊断里的 event_id。
 - 如果工具返回 stale_event_id，说明你用了旧事件；立刻改用 current_event_id 重试一次，仍失败就用 current_event_id 回复玩家失败原因。
+- 需要战斗、位置、队伍、任务、背包、游戏环境或最近动作结果时，按需调用 wow_playerbot MCP 工具查询；不要假设这些上下文每轮都会随事件一起提供。
+- 日常聊天和记忆由 Hermes 当前 conversation/session 管理；relay 不会每轮嵌入游戏环境。玩家说“新建会话/重置上下文”只表示切换短期 conversation epoch，不表示删除长期记忆。
+- 不要用 wow_get_recent_events 重建聊天记忆或补齐旧上下文；玩家明确要求查看最近游戏消息/日志时才调用它，并传 current_event_id 让工具按当前玩家或队伍压缩返回。
+- 玩家问“刚才成了吗/怎么没反应/最近做了什么动作”时，优先调用 wow_get_last_command_diagnostic(current_event_id)，不要扫旧 event_id。
 - 不要凭 map_id/zone_id/area_id 猜地点；必须使用工具或事件中的 map_name/zone_name/area_name。
 - 战斗中的高频技能、治疗、坦克和 DPS 循环交给 playerbots 本能，不要规划逐技能释放。
 - party/raid/say 事件按队伍级上下文处理；whisper 事件只在私聊上下文回答，不要泄露到 party。
+- whisper 事件必须只用 whisper 回复；不要在 whisper 事件里调用默认 party 回复。
 - 随机世界 bot 只能回复，不能控制移动、战斗、组队或策略。
 - 游戏玩家看不到你的最终 assistant 文本；凡是需要让玩家知道答案、失败原因、澄清问题或闲聊回复，都必须调用 wow_reply。
 - 如果你调用了观察工具来回答玩家问题，拿到结论后必须用 wow_reply 发回原请求频道。
@@ -154,6 +180,8 @@ class HermesClient:
         timeout: int,
         trace_raw: bool = False,
         store: bool = False,
+        payload_mode: str = "minimal",
+        include_recent_actions: bool = False,
     ) -> None:
         self.url = url
         self.api_key = api_key
@@ -161,14 +189,30 @@ class HermesClient:
         self.timeout = timeout
         self.trace_raw = trace_raw
         self.store = store
+        self.payload_mode = normalize_payload_mode(payload_mode)
+        self.include_recent_actions = include_recent_actions
 
-    def send_event(self, *, conversation: str, event: dict[str, Any], action_results: list[dict[str, Any]]) -> dict[str, Any]:
+    def send_event(
+        self,
+        *,
+        conversation: str,
+        event: dict[str, Any],
+        action_results: list[dict[str, Any]],
+        session: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        event_payload = event_payload_for_hermes(event, self.payload_mode)
+        session_payload = {"conversation": conversation, "store": self.store}
+        if session:
+            session_payload.update(session)
         envelope = {
             "kind": "wow_playerbot_event",
             "current_event_id": event.get("id"),
-            "event": event,
-            "recent_action_results": action_results,
+            "event": event_payload,
+            "context_mode": "on_demand" if self.payload_mode == "minimal" else "embedded",
+            "session": session_payload,
         }
+        if self.include_recent_actions:
+            envelope["recent_action_results"] = action_results
         payload = {
             "model": self.model,
             "conversation": conversation,
@@ -190,8 +234,10 @@ class HermesClient:
             conversation=conversation,
             model=self.model,
             url=self.url,
-            event_payload=event if self.trace_raw else None,
-            recent_action_results=action_results if self.trace_raw else None,
+            payload_mode=self.payload_mode,
+            include_recent_actions=self.include_recent_actions,
+            event_payload=event_payload if self.trace_raw else None,
+            recent_action_results=action_results if self.trace_raw and self.include_recent_actions else None,
         )
 
         request = urllib.request.Request(
@@ -259,6 +305,14 @@ def response_text(value: Any) -> str:
     return ""
 
 
+def hermes_visible_reply_text(value: str) -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() == "no_action":
+        return ""
+    # Game chat is the only player-visible UI, so keep fallback text bounded.
+    return text[:900]
+
+
 def default_conversation_epoch() -> str:
     return os.getenv("PLAYERBOT_HERMES_CONVERSATION_EPOCH", "").strip()
 
@@ -313,6 +367,21 @@ def split_config_ints(value: str) -> set[int]:
     return result
 
 
+def normalize_payload_mode(value: str) -> str:
+    mode = str(value or "").strip().lower()
+    if mode in {"full", "embedded"}:
+        return "full"
+    return "minimal"
+
+
+def event_payload_for_hermes(event: dict[str, Any], payload_mode: str = "minimal") -> dict[str, Any]:
+    if normalize_payload_mode(payload_mode) == "full":
+        return event
+    payload = {key: event.get(key) for key in MINIMAL_EVENT_KEYS if key in event}
+    payload["context_available"] = isinstance(event.get("context"), dict) and bool(event.get("context"))
+    return payload
+
+
 def anchor_bot_name() -> str:
     return os.getenv("PLAYERBOT_AGENT_ANCHOR_BOT_NAME", ANCHOR_BOT_DEFAULT_NAME).strip()
 
@@ -327,6 +396,27 @@ def message_addresses_anchor(message: str) -> bool:
     if not text:
         return False
     return any(alias.lower() in text for alias in anchor_bot_aliases())
+
+
+def configured_listen_scope() -> str:
+    scope = os.getenv("PLAYERBOT_HERMES_LISTEN_SCOPE", "direct").strip().lower()
+    return scope if scope in LISTEN_SCOPES else "direct"
+
+
+def event_matches_listen_scope(event: dict[str, Any]) -> bool:
+    scope = configured_listen_scope()
+    channel = str(event.get("channel") or "").strip().lower()
+    if scope == "all":
+        return True
+    if scope == "whisper":
+        return channel == "whisper"
+    if channel == "whisper":
+        return True
+    if channel in {"say", "yell"} and message_addresses_anchor(str(event.get("message") or "")):
+        return scope in {"direct", "group"}
+    if channel in {"party", "raid"}:
+        return scope == "group"
+    return False
 
 
 def configured_allowed_player_names() -> set[str]:
@@ -362,6 +452,19 @@ def speaker_is_allowed(event: dict[str, Any]) -> bool:
     )
 
 
+def unauthorized_reply_text() -> str:
+    return os.getenv("PLAYERBOT_HERMES_UNAUTHORIZED_REPLY", DEFAULT_UNAUTHORIZED_REPLY).strip() or DEFAULT_UNAUTHORIZED_REPLY
+
+
+def reply_channel_for_event(event: dict[str, Any]) -> str:
+    channel = str(event.get("channel") or "party").strip().lower()
+    if channel == "yell":
+        return "say"
+    if channel in REPLY_CHANNELS:
+        return channel
+    return "party"
+
+
 def is_quest_progress_noise(message: str) -> bool:
     text = str(message or "").strip()
     if not text:
@@ -388,6 +491,8 @@ def should_skip_event(event: dict[str, Any]) -> tuple[bool, str]:
     message = str(event.get("message") or "")
     if env_bool("PLAYERBOT_HERMES_IGNORE_QUEST_PROGRESS_CHAT", True) and is_quest_progress_noise(message):
         return True, "quest_progress_noise"
+    if not event_matches_listen_scope(event):
+        return True, "outside_listen_scope"
     if (
         env_bool("PLAYERBOT_HERMES_IGNORE_UNADDRESSED_SAY", False)
         and channel in {"say", "yell"}
@@ -437,6 +542,18 @@ def context_control_request(message: str) -> str:
     ):
         return "reset"
     return ""
+
+
+def intrinsic_command_request(message: str) -> str:
+    text = SOCIAL_PUNCT_RE.sub("", compact_message(message))
+    if not text:
+        return ""
+    for alias in sorted((alias.lower() for alias in anchor_bot_aliases()), key=len, reverse=True):
+        if text.startswith(alias):
+            text = text[len(alias):]
+        if text.endswith(alias):
+            text = text[: -len(alias)]
+    return INTRINSIC_COMMANDS.get(text, "")
 
 
 def parse_stack_count(text: str) -> int:
@@ -663,8 +780,15 @@ def select_reply_bot(
     return str(event.get("bot_name") or "").strip() or None
 
 
-def successful_visible_reply(results: list[dict[str, Any]]) -> bool:
-    return any(item.get("action_type") == "reply" and item.get("status") == "done" for item in results)
+def successful_visible_reply(results: list[dict[str, Any]], *, channel: str = "") -> bool:
+    expected_channel = str(channel or "").strip().lower()
+    for item in results:
+        if item.get("action_type") != "reply" or item.get("status") != "done":
+            continue
+        if expected_channel and str(item.get("channel") or "").strip().lower() != expected_channel:
+            continue
+        return True
+    return False
 
 
 def latest_failed_reply(results: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -769,8 +893,16 @@ class Relay:
         )
 
     def conversation_for_event(self, event: dict[str, Any]) -> str:
+        return self.conversation_session_for_event(event)["conversation"]
+
+    def conversation_session_for_event(self, event: dict[str, Any]) -> dict[str, Any]:
         base = base_conversation_for(event)
-        return conversation_for(event, self.conversation_epochs.get(base) or default_conversation_epoch())
+        epoch = self.conversation_epochs.get(base) or default_conversation_epoch()
+        return {
+            "base_conversation": base,
+            "conversation_epoch": epoch,
+            "conversation": conversation_for(event, epoch),
+        }
 
     def rotate_conversation_epoch(self, event: dict[str, Any]) -> tuple[str, str]:
         base = base_conversation_for(event)
@@ -793,13 +925,16 @@ class Relay:
         return len(events)
 
     def handle_event(self, event: dict[str, Any]) -> None:
-        conversation = self.conversation_for_event(event)
+        session = self.conversation_session_for_event(event)
+        conversation = session["conversation"]
         skip, skip_reason = should_skip_event(event)
         if skip:
             log_event(
                 "relay_event_skipped",
                 event_id=event["id"],
                 conversation=conversation,
+                base_conversation=session["base_conversation"],
+                conversation_epoch=session["conversation_epoch"],
                 channel=event["channel"],
                 speaker=event["speaker_name"],
                 message=event["message"],
@@ -812,16 +947,27 @@ class Relay:
                 "relay_event_unauthorized",
                 event_id=event["id"],
                 conversation=conversation,
+                base_conversation=session["base_conversation"],
+                conversation_epoch=session["conversation_epoch"],
                 channel=event["channel"],
                 speaker=event["speaker_name"],
                 speaker_guid=event.get("speaker_guid"),
                 speaker_account=event.get("speaker_account"),
                 message=event["message"],
             )
+            self.enqueue_visible_reply(
+                event,
+                unauthorized_reply_text(),
+                channel=reply_channel_for_event(event),
+                requested_bot=anchor_bot_name(),
+                reason="unauthorized_whitelist",
+            )
             return
         if self.try_handle_context_control(event):
             return
         if self.try_handle_simple_social_message(event):
+            return
+        if self.try_handle_intrinsic_command(event):
             return
         if self.try_handle_consumable_request(event):
             return
@@ -831,22 +977,23 @@ class Relay:
             "relay_event",
             event_id=event["id"],
             conversation=conversation,
+            base_conversation=session["base_conversation"],
+            conversation_epoch=session["conversation_epoch"],
             channel=event["channel"],
             speaker=event["speaker_name"],
             message=event["message"],
         )
-        action_results = fetch_action_results(self.db, int(event["id"]), limit=8)
-        self.client.send_event(conversation=conversation, event=event, action_results=action_results)
+        include_recent_actions = bool(getattr(self.client, "include_recent_actions", False))
+        action_results = fetch_action_results(self.db, int(event["id"]), limit=8) if include_recent_actions else []
+        response = self.client.send_event(conversation=conversation, event=event, action_results=action_results, session=session)
         settled_results = self.wait_for_action_results(int(event["id"]))
-        self.ensure_visible_reply(event, settled_results)
+        self.ensure_visible_reply(event, settled_results, hermes_text=response_text(response))
 
     def try_handle_context_control(self, event: dict[str, Any]) -> bool:
         mode = context_control_request(str(event.get("message") or ""))
         if not mode:
             return False
-        channel = str(event.get("channel") or "party").strip().lower()
-        if channel not in REPLY_CHANNELS:
-            channel = "party"
+        channel = reply_channel_for_event(event)
         base, conversation = self.rotate_conversation_epoch(event)
         reply = "已切到新会话，后续消息不会再带旧上下文。"
         if mode == "compress":
@@ -868,9 +1015,7 @@ class Relay:
         reply = simple_social_reply_text(str(event.get("message") or ""))
         if not reply:
             return False
-        channel = str(event.get("channel") or "party").strip().lower()
-        if channel not in REPLY_CHANNELS:
-            channel = "party"
+        channel = reply_channel_for_event(event)
         log_event(
             "fast_social_reply",
             event_id=event["id"],
@@ -882,15 +1027,28 @@ class Relay:
         self.enqueue_visible_reply(event, reply, channel=channel, reason="fast_social_reply")
         return True
 
+    def try_handle_intrinsic_command(self, event: dict[str, Any]) -> bool:
+        command = intrinsic_command_request(str(event.get("message") or ""))
+        if not command:
+            return False
+        log_event(
+            "fast_intrinsic_command",
+            event_id=event["id"],
+            channel=str(event.get("channel") or "").strip().lower(),
+            speaker=event.get("speaker_name"),
+            message=event.get("message"),
+            command=command,
+            reason="handled_by_playerbot_instinct",
+        )
+        return True
+
     def try_handle_consumable_request(self, event: dict[str, Any]) -> bool:
         request = parse_consumable_request(str(event.get("message") or ""))
         if not request:
             return False
 
         event_id = int(event["id"])
-        channel = str(event.get("channel") or "party").strip().lower()
-        if channel not in REPLY_CHANNELS:
-            channel = "party"
+        channel = reply_channel_for_event(event)
 
         water = int(request["water_stacks"])
         food = int(request["food_stacks"])
@@ -959,9 +1117,7 @@ class Relay:
             return False
 
         event_id = int(event["id"])
-        channel = str(event.get("channel") or "party").strip().lower()
-        if channel not in REPLY_CHANNELS:
-            channel = "party"
+        channel = reply_channel_for_event(event)
 
         targets = offline_group_bot_names(event)
         if not targets:
@@ -1092,13 +1248,10 @@ class Relay:
             time.sleep(0.5)
         return latest
 
-    def ensure_visible_reply(self, event: dict[str, Any], results: list[dict[str, Any]]) -> None:
-        if not results or successful_visible_reply(results):
+    def ensure_visible_reply(self, event: dict[str, Any], results: list[dict[str, Any]], *, hermes_text: str = "") -> None:
+        channel = reply_channel_for_event(event)
+        if results and successful_visible_reply(results, channel=channel):
             return
-
-        channel = str(event.get("channel") or "party").strip().lower()
-        if channel not in REPLY_CHANNELS:
-            channel = "party"
 
         failed_reply = latest_failed_reply(results)
         if failed_reply:
@@ -1121,6 +1274,11 @@ class Relay:
             requested = ""
             avoid = set()
             reason = "confirm_action_without_reply"
+        elif not results:
+            text = hermes_visible_reply_text(hermes_text)
+            requested = str(event.get("bot_name") or event.get("target_name") or "").strip()
+            avoid = set()
+            reason = "hermes_final_text_without_reply"
         else:
             return
 
@@ -1185,6 +1343,8 @@ def main() -> int:
         env_int("PLAYERBOT_HERMES_TIMEOUT", 120, 1),
         trace_raw=env_bool("PLAYERBOT_HERMES_TRACE_RAW", False),
         store=env_bool("PLAYERBOT_HERMES_STORE", False),
+        payload_mode=os.getenv("PLAYERBOT_HERMES_PAYLOAD_MODE", "minimal"),
+        include_recent_actions=env_bool("PLAYERBOT_HERMES_INCLUDE_RECENT_ACTIONS", False),
     )
     relay = Relay(
         db,

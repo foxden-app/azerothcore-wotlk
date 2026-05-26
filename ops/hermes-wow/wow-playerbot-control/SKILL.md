@@ -58,9 +58,13 @@ metadata:
 
 如果事件里上下文不足：
 
+- 日常聊天和“还记得我们聊到哪了”优先依赖 Hermes 当前 conversation/session 与记忆；不要调用 `wow_get_recent_events` 来重建聊天上下文。
+- 玩家说“新建会话/重置上下文/清空上下文/压缩上下文”后，只代表短期 conversation epoch 被切换，不代表长期记忆被删除。
+- whisper 事件必须用 `wow_reply(channel="whisper")` 回答；不要在 whisper 事件里省略 channel，避免默认发到 party。
 - 需要队伍、机器人名单、职业、在线状态时，调用 `wow_get_party_state`。
 - 需要当前位置时，调用 `wow_get_location`。
 - 需要确认刚才是否执行成功、为什么没反应、最近做了什么时，优先调用 `wow_get_last_command_diagnostic`；只查单个事件动作结果时才用 `wow_get_action_results`。
+- 需要查看最近游戏消息或日志时，才调用 `wow_get_recent_events(event_id=current_event_id)`；它默认返回压缩摘要，不返回完整游戏 context。
 - 需要解释任务、查看当前任务进度、讲任务故事或搜索任务线索时，优先调用 `wow_get_quest_guide`；需要补查库时再用 `wow_get_player_quests`、`wow_search_quests` 或 `wow_get_quest_details`。
 - 需要去某地、找拍卖行/飞行点/副本入口、查看谁掉队时，调用 `wow_resolve_place`、`wow_plan_route` 或 `wow_get_group_travel_status`。
 - 需要估价、背包可卖物、拍卖行行情时，只能调用只读拍卖工具：`wow_get_inventory_for_trade`、`wow_search_auction`、`wow_estimate_item_value`、`wow_plan_auction_sales`。
@@ -70,7 +74,7 @@ metadata:
 
 | 工具 | 何时使用 |
 | --- | --- |
-| `wow_get_recent_events` | 需要回看最近游戏消息时。 |
+| `wow_get_recent_events` | 需要回看最近游戏消息或日志时；必须用当前 `event_id` 锚定，不能用于重建聊天记忆；不传 `event_id` 会被硬限制为最多 3 条。 |
 | `wow_get_party_state` | 判断队伍、机器人、可控对象、上下文缺口。 |
 | `wow_get_location` | 回答“我在哪/这是哪/在哪个副本”。 |
 | `wow_get_action_results` | 状态改变后确认，或玩家问“刚才成功了吗”。 |
@@ -105,6 +109,9 @@ metadata:
 | `wow_bot_pull` | 让坦克或指定 bot 拉请求玩家当前目标。 |
 | `wow_bot_ready` | 让指定 bot 或整队执行准备确认。 |
 | `wow_bot_burst` | 让指定 bot 或整队进入 max dps 爆发指令。 |
+| `wow_bot_grind` | 让可控机器人进入自主刷怪模式。 |
+| `wow_bot_equip_upgrades` | 让机器人装备背包里的升级装备，不花钱。 |
+| `wow_bot_maintenance` | 管理员维护：卖灰、卖可卖物、修理、附近商人买有用装备、查看/领取邮件。 |
 | `wow_focus_heal` | 让治疗 bot 重点照看某个玩家，或取消/清空重点治疗。 |
 | `wow_bot_provide_consumables` | 让可控法师给请求玩家或指定队友提供法师水和面包。 |
 | `wow_get_inventory_for_trade` | 只读读取发言玩家或可控 bot 背包里的可交易候选物品。 |
@@ -160,6 +167,7 @@ metadata:
 | “停一下/原地等/别动” | `wow_bot_stay` | 默认 `bot_name="group"` |
 | “撤/跑/离远点” | `wow_bot_retreat` | 默认 `mode="flee"` |
 | “散开/跑远点” | `wow_bot_retreat` | `mode="runaway"` |
+| “自己打/自主打怪/自己刷怪/开自动刷怪” | `wow_bot_grind` -> `wow_set_loot_mode` | 点名瓦小狸时 `bot_name="瓦小狸"`；通常再设 `mode="all"` |
 | “打我目标/集火/攻击” | `wow_bot_attack_target` | 默认 `bot_name="group"` |
 | “开怪/拉一下/坦克拉” | `wow_bot_pull` | 未点名时优先选 tank |
 | “准备好了吗/ready/检查准备” | `wow_bot_ready` | 默认整队 |
@@ -171,7 +179,9 @@ metadata:
 | “别抢仇恨/治疗专心奶” | `wow_set_healer_dps` | `enabled=false` |
 | “治疗也打/奶也输出” | `wow_set_healer_dps` | `enabled=true` |
 | “别捡东西/停止拾取” | `wow_set_loot_mode` | `mode="off"` |
-| “正常拾取/捡灰/全捡” | `wow_set_loot_mode` | `normal`、`gray`、`all` |
+| “正常拾取/捡灰/全捡/捡铜币/打完捡钱” | `wow_set_loot_mode` | `normal`、`gray`、`all`；捡钱用 `all` |
+| “整理装备/把好装备穿上/升级自己的装备” | `wow_bot_equip_upgrades` | 只换背包已有装备，不买、不卖 |
+| “卖灰/修理/买装备/领邮件/收邮件” | `wow_bot_maintenance` | 会改变金币或物品；只有管理员请求才允许，执行后查结果 |
 | “补 buff/上 buff/不用 buff” | `wow_set_buff` | `enabled=true/false` |
 
 ## 战斗复盘规则

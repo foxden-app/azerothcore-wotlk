@@ -1690,7 +1690,8 @@ bool IsSafePlayerbotCommandLine(std::string const& value)
 bool IsAllowedBotCommand(std::string const& command)
 {
     static std::vector<std::string> const exactCommands = {
-        "follow", "stay", "flee", "runaway", "attack", "pull", "pull back", "ready", "max dps"
+        "follow", "stay", "flee", "runaway", "attack", "grind", "pull", "pull back", "ready", "max dps",
+        "equip upgrade", "repair", "b vendor", "mail ?", "mail take *"
     };
 
     std::string normalized = ToLowerAscii(command);
@@ -1702,6 +1703,12 @@ bool IsAllowedBotCommand(std::string const& command)
         std::string arg = normalized.substr(3);
         return arg == "normal" || arg == "gray" || arg == "g" || arg == "all" || arg == "*" ||
                arg == "disenchant" || arg == "d" || arg == "e" || arg == "enchant";
+    }
+
+    if (StartsWith(normalized, "s "))
+    {
+        std::string arg = normalized.substr(2);
+        return arg == "gray" || arg == "vendor";
     }
 
     if (StartsWith(normalized, "focus heal "))

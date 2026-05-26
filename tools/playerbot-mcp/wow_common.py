@@ -33,6 +33,7 @@ EVENT_ZH: dict[str, str] = {
     "fast_consumable_request": "快捷补给请求",
     "fast_consumable_no_mage": "快捷补给无可用法师",
     "fast_consumable_reply": "快捷补给结果回复",
+    "fast_intrinsic_command": "快捷跳过本能命令",
     "fast_team_online_request": "快捷叫回离线队友",
     "fast_team_online_no_offline_group_bots": "快捷叫回队友无离线机器人",
     "fallback_reply_enqueued": "兜底回复已入队",
@@ -326,24 +327,242 @@ def event_row_to_dict(row: list[str | None]) -> dict[str, Any]:
     }
 
 
+COMPACT_EVENT_MESSAGE_LIMIT = 400
+COMPACT_CONTEXT_TEXT_LIMIT = 180
+COMPACT_CONTEXT_ACTOR_LIMIT = 8
+
+
+def compact_text(value: Any, limit: int = COMPACT_CONTEXT_TEXT_LIMIT) -> str:
+    text = "" if value is None else str(value)
+    bounded = max(16, int(limit))
+    if len(text) <= bounded:
+        return text
+    return text[:bounded] + f"...<已截断 {len(text) - bounded} 个字符>"
+
+
+def compact_scalar(value: Any) -> Any:
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    return compact_text(value)
+
+
+def compact_location(location: Any) -> dict[str, Any]:
+    if not isinstance(location, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key in ("map_name", "zone_name", "area_name", "name", "map_id", "zone_id", "area_id"):
+        value = location.get(key)
+        if value not in (None, ""):
+            result[key] = compact_scalar(value)
+    return result
+
+
+def compact_actor(actor: Any) -> dict[str, Any]:
+    if not isinstance(actor, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key in (
+        "guid",
+        "name",
+        "level",
+        "class",
+        "class_name",
+        "race",
+        "race_name",
+        "team",
+        "online",
+        "alive",
+        "combat",
+        "bot_kind",
+        "role",
+        "spec",
+        "distance",
+        "map_id",
+        "zone_id",
+        "area_id",
+    ):
+        value = actor.get(key)
+        if value not in (None, ""):
+            result[key] = compact_scalar(value)
+    location = compact_location(actor.get("location"))
+    if location:
+        result["location"] = location
+    return result
+
+
+def compact_actor_list(items: Any, limit: int = COMPACT_CONTEXT_ACTOR_LIMIT) -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+    actors = [compact_actor(item) for item in items if isinstance(item, dict)]
+    actors = [actor for actor in actors if actor]
+    bounded = max(1, int(limit))
+    result = actors[:bounded]
+    if len(actors) > bounded:
+        result.append({"omitted": len(actors) - bounded})
+    return result
+
+
+def compact_context(event: dict[str, Any]) -> dict[str, Any]:
+    context = event.get("context") if isinstance(event.get("context"), dict) else {}
+    if not context:
+        return {}
+    result: dict[str, Any] = {}
+    speaker = compact_actor(context.get("speaker"))
+    if speaker:
+        result["speaker"] = speaker
+    environment = context.get("environment") if isinstance(context.get("environment"), dict) else {}
+    environment_location = compact_location(environment.get("location")) if environment else {}
+    if environment_location:
+        result["environment"] = {"location": environment_location}
+    target_bot = compact_actor(context.get("target_bot_context"))
+    if target_bot:
+        result["target_bot_context"] = target_bot
+    bots = compact_actor_list(context.get("bots"))
+    if bots:
+        result["bots"] = bots
+    members = compact_actor_list(context.get("group_members"))
+    if members:
+        result["group_members"] = members
+    combat = context.get("combat") if isinstance(context.get("combat"), dict) else {}
+    if combat:
+        result["combat"] = {
+            key: compact_scalar(combat[key])
+            for key in ("in_combat", "active", "started_at", "ended_at", "duration_ms", "summary_id")
+            if combat.get(key) not in (None, "")
+        }
+    omitted = sorted(
+        key
+        for key in context
+        if key not in {"speaker", "environment", "target_bot_context", "bots", "group_members", "combat"}
+    )
+    if omitted:
+        result["omitted_context_keys"] = omitted[:16]
+        if len(omitted) > 16:
+            result["omitted_context_keys"].append(f"<已省略 {len(omitted) - 16} 项>")
+    return result
+
+
+def event_context_summary(event: dict[str, Any]) -> dict[str, Any]:
+    context = event.get("context") if isinstance(event.get("context"), dict) else {}
+    summary: dict[str, Any] = {"context_available": bool(context)}
+    if not context:
+        return summary
+
+    speaker = context.get("speaker") if isinstance(context.get("speaker"), dict) else {}
+    environment = context.get("environment") if isinstance(context.get("environment"), dict) else {}
+    location = compact_location(environment.get("location") if environment else {})
+    if not location:
+        location = compact_location(speaker.get("location") if speaker else {})
+    if location:
+        summary["location"] = location
+
+    raw_members = context.get("group_members") if isinstance(context.get("group_members"), list) else []
+    raw_bots = context.get("bots") if isinstance(context.get("bots"), list) else []
+    bot_names: list[str] = []
+    player_names: list[str] = []
+    online_count = 0
+    for member in raw_members:
+        if not isinstance(member, dict):
+            continue
+        name = str(member.get("name") or "").strip()
+        if member.get("online", True):
+            online_count += 1
+        if str(member.get("bot_kind") or ""):
+            if name:
+                bot_names.append(name)
+        elif name:
+            player_names.append(name)
+    for bot in raw_bots:
+        if not isinstance(bot, dict):
+            continue
+        name = str(bot.get("name") or "").strip()
+        if name and name not in bot_names:
+            bot_names.append(name)
+    if raw_members or raw_bots:
+        summary["party"] = {
+            "members": len(raw_members),
+            "online": online_count if raw_members else None,
+            "bots": bot_names[:COMPACT_CONTEXT_ACTOR_LIMIT],
+            "players": player_names[:COMPACT_CONTEXT_ACTOR_LIMIT],
+        }
+
+    combat = context.get("combat") if isinstance(context.get("combat"), dict) else {}
+    member_in_combat = any(
+        bool(item.get("combat") or item.get("in_combat"))
+        for item in raw_members
+        if isinstance(item, dict)
+    )
+    speaker_in_combat = bool(speaker.get("combat") or speaker.get("in_combat")) if speaker else False
+    summary["combat"] = {
+        "in_combat": bool(combat.get("in_combat") or combat.get("active") or speaker_in_combat or member_in_combat),
+        "has_combat_context": bool(combat or context.get("recent_combat") or context.get("combat_summaries")),
+    }
+    summary["available_context_keys"] = sorted(context.keys())[:16]
+    return summary
+
+
+def compact_event(event: dict[str, Any], *, include_context: bool = False) -> dict[str, Any]:
+    message = str(event.get("message") or "")
+    result: dict[str, Any] = {
+        "id": event.get("id"),
+        "created_at": event.get("created_at"),
+        "channel": event.get("channel"),
+        "speaker": {
+            "guid": event.get("speaker_guid"),
+            "account": event.get("speaker_account"),
+            "name": event.get("speaker_name"),
+        },
+        "message": compact_text(message, COMPACT_EVENT_MESSAGE_LIMIT),
+        "context_available": isinstance(event.get("context"), dict) and bool(event.get("context")),
+        "context_summary": event_context_summary(event),
+    }
+    if len(message) > COMPACT_EVENT_MESSAGE_LIMIT:
+        result["message_truncated"] = True
+    if event.get("target_guid") or event.get("target_name"):
+        result["target"] = {"guid": event.get("target_guid"), "name": event.get("target_name")}
+    if event.get("bot_guid") or event.get("bot_name"):
+        result["bot"] = {"guid": event.get("bot_guid"), "name": event.get("bot_name")}
+    if event.get("group_leader_guid"):
+        result["group_leader_guid"] = event.get("group_leader_guid")
+    if include_context:
+        result["context"] = compact_context(event)
+        result["context_is_compacted"] = True
+    return result
+
+
 def fetch_events(
     db: MysqlCli,
     *,
     after_id: int = 0,
     limit: int = 20,
     unprocessed_only: bool = False,
+    max_id: int = 0,
+    speaker_guid: int = 0,
+    group_leader_guid: int = 0,
+    channel: str = "",
+    newest_first: bool = False,
 ) -> list[dict[str, Any]]:
     bounded_limit = max(1, min(int(limit), 100))
     filters = [f"`id` > {int(after_id)}"]
+    if int(max_id) > 0:
+        filters.append(f"`id` <= {int(max_id)}")
+    if int(speaker_guid) > 0:
+        filters.append(f"`speaker_guid` = {int(speaker_guid)}")
+    if int(group_leader_guid) > 0:
+        filters.append(f"`group_leader_guid` = {int(group_leader_guid)}")
+    clean_channel = str(channel or "").strip()
+    if clean_channel:
+        filters.append(f"`channel` = {sql_quote(clean_channel)}")
     if unprocessed_only:
         filters.append("`processed_at` IS NULL")
     where = " AND ".join(filters)
+    order = "DESC" if newest_first else "ASC"
     rows = db.query_rows(
         "SELECT `id`, `created_at`, `channel`, `speaker_guid`, `speaker_account`, `speaker_name`, "
         "`target_guid`, `target_name`, `bot_guid`, `bot_name`, `group_leader_guid`, "
         "TO_BASE64(COALESCE(`meta`, '')), TO_BASE64(`message`) "
         "FROM `agent_playerbot_events` "
-        f"WHERE {where} ORDER BY `id` ASC LIMIT {bounded_limit}"
+        f"WHERE {where} ORDER BY `id` {order} LIMIT {bounded_limit}"
     )
     return [event_row_to_dict(row) for row in rows]
 

@@ -16,6 +16,47 @@ import server
 import wow_common
 
 
+def b64_text(value):
+    return base64.b64encode(str(value).encode("utf-8")).decode("ascii")
+
+
+def b64_json(value):
+    return base64.b64encode(json.dumps(value, ensure_ascii=False).encode("utf-8")).decode("ascii")
+
+
+def event_row(
+    *,
+    event_id=101,
+    created_at="2026-05-25 19:00:00",
+    channel="whisper",
+    speaker_guid=556,
+    speaker_account=1,
+    speaker_name="Wuya",
+    target_guid=202,
+    target_name="瓦小狸",
+    bot_guid=202,
+    bot_name="瓦小狸",
+    group_leader_guid=556,
+    meta=None,
+    message="你好",
+):
+    return [
+        str(event_id),
+        created_at,
+        channel,
+        str(speaker_guid),
+        str(speaker_account),
+        speaker_name,
+        str(target_guid) if target_guid is not None else None,
+        target_name,
+        str(bot_guid) if bot_guid is not None else None,
+        bot_name,
+        str(group_leader_guid) if group_leader_guid is not None else None,
+        b64_json(meta or {}),
+        b64_text(message),
+    ]
+
+
 class CommonTests(unittest.TestCase):
     def test_sql_quote_escapes_text(self):
         self.assertEqual(wow_common.sql_quote("a'b\\c\n"), "'a\\'b\\\\c\\n'")
@@ -44,6 +85,88 @@ class CommonTests(unittest.TestCase):
         self.assertIn("`id` > 7", db.sql)
         self.assertIn("`processed_at` IS NULL", db.sql)
         self.assertIn("LIMIT 100", db.sql)
+
+    def test_fetch_events_can_scope_and_query_newest_first(self):
+        class FakeDb:
+            sql = ""
+
+            def query_rows(self, sql):
+                self.sql = sql
+                return []
+
+        db = FakeDb()
+        events = wow_common.fetch_events(
+            db,
+            after_id=7,
+            max_id=20,
+            limit=5,
+            speaker_guid=556,
+            group_leader_guid=556,
+            channel="whisper",
+            newest_first=True,
+        )
+
+        self.assertEqual(events, [])
+        self.assertIn("`id` > 7", db.sql)
+        self.assertIn("`id` <= 20", db.sql)
+        self.assertIn("`speaker_guid` = 556", db.sql)
+        self.assertIn("`group_leader_guid` = 556", db.sql)
+        self.assertIn("`channel` = 'whisper'", db.sql)
+        self.assertIn("ORDER BY `id` DESC LIMIT 5", db.sql)
+
+    def test_recent_events_limit_requires_anchor_for_wide_reads(self):
+        self.assertEqual(server.recent_events_limit(10, anchored=True), 10)
+        self.assertEqual(server.recent_events_limit(10, anchored=False), 3)
+        self.assertEqual(server.recent_events_limit(0, anchored=False), 1)
+
+    def test_compact_event_omits_full_context_by_default(self):
+        meta = {
+            "speaker": {
+                "guid": 556,
+                "name": "Wuya",
+                "level": 70,
+                "combat": False,
+                "location": {"map_name": "艾泽拉斯", "zone_name": "荆棘谷", "area_name": "藏宝海湾"},
+            },
+            "environment": {
+                "location": {"map_name": "艾泽拉斯", "zone_name": "荆棘谷", "area_name": "藏宝海湾"}
+            },
+            "group_members": [
+                {"guid": 556, "name": "Wuya", "online": True},
+                {"guid": 202, "name": "瓦小狸", "online": True, "bot_kind": "anchor_world"},
+            ],
+            "bots": [{"guid": 202, "name": "瓦小狸", "bot_kind": "anchor_world"}],
+            "quest_log": [{"title": "很长的任务上下文", "body": "x" * 5000}],
+        }
+        event = wow_common.event_row_to_dict(event_row(meta=meta, message="x" * 500))
+
+        compact = wow_common.compact_event(event)
+
+        self.assertNotIn("context", compact)
+        self.assertTrue(compact["context_available"])
+        self.assertTrue(compact["message_truncated"])
+        self.assertEqual(compact["context_summary"]["location"]["zone_name"], "荆棘谷")
+        self.assertEqual(compact["context_summary"]["party"]["members"], 2)
+        self.assertIn("瓦小狸", compact["context_summary"]["party"]["bots"])
+        self.assertIn("quest_log", compact["context_summary"]["available_context_keys"])
+
+    def test_compact_event_include_context_is_still_whitelisted(self):
+        meta = {
+            "speaker": {"guid": 556, "name": "Wuya", "location": {"zone_name": "荆棘谷"}},
+            "group_members": [{"name": f"Bot{i}", "bot_kind": "group"} for i in range(12)],
+            "inventory": {"items": [{"name": "huge", "text": "x" * 5000}]},
+        }
+        event = wow_common.event_row_to_dict(event_row(meta=meta))
+
+        compact = wow_common.compact_event(event, include_context=True)
+
+        self.assertTrue(compact["context_is_compacted"])
+        self.assertIn("context", compact)
+        self.assertIn("group_members", compact["context"])
+        self.assertEqual(compact["context"]["group_members"][-1]["omitted"], 4)
+        self.assertNotIn("inventory", compact["context"])
+        self.assertIn("inventory", compact["context"]["omitted_context_keys"])
+        self.assertLess(len(json.dumps(compact["context"], ensure_ascii=False)), 3000)
 
     def test_relay_skip_backlog_on_start_marks_unprocessed_rows(self):
         class FakeDb:
@@ -110,6 +233,94 @@ class CommonTests(unittest.TestCase):
             client.send_event(conversation="wow-test", event={"id": 1}, action_results=[])
 
         self.assertFalse(captured["payload"]["store"])
+
+    def test_hermes_client_minimal_payload_omits_context_and_recent_actions(self):
+        captured = {}
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"id":"resp_test","status":"completed","output":[]}'
+
+        def fake_urlopen(request, timeout):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+
+        client = hermes_relay.HermesClient(
+            "http://127.0.0.1:8642/v1/responses",
+            api_key="",
+            model="hermes-agent",
+            timeout=1,
+            store=False,
+            payload_mode="minimal",
+            include_recent_actions=False,
+        )
+        event = {
+            "id": 11,
+            "channel": "whisper",
+            "speaker_guid": 556,
+            "speaker_name": "Wuya",
+            "bot_guid": 20,
+            "bot_name": "瓦小狸",
+            "message": "我在哪里",
+            "context": {"group_members": [{"name": "中年狼"}], "combat": {"in_combat": True}},
+        }
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            client.send_event(conversation="wow-test", event=event, action_results=[{"id": 1}])
+
+        envelope = json.loads(captured["payload"]["input"].split("\n", 1)[1])
+        self.assertEqual(envelope["context_mode"], "on_demand")
+        self.assertEqual(envelope["session"]["conversation"], "wow-test")
+        self.assertFalse(envelope["session"]["store"])
+        self.assertNotIn("recent_action_results", envelope)
+        self.assertNotIn("context", envelope["event"])
+        self.assertTrue(envelope["event"]["context_available"])
+        self.assertEqual(envelope["event"]["message"], "我在哪里")
+
+    def test_hermes_client_full_payload_can_include_recent_actions(self):
+        captured = {}
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"id":"resp_test","status":"completed","output":[]}'
+
+        def fake_urlopen(request, timeout):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+
+        client = hermes_relay.HermesClient(
+            "http://127.0.0.1:8642/v1/responses",
+            api_key="",
+            model="hermes-agent",
+            timeout=1,
+            payload_mode="full",
+            include_recent_actions=True,
+        )
+        event = {"id": 12, "message": "debug", "context": {"bots": [{"name": "瓦小狸"}]}}
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            client.send_event(conversation="wow-test", event=event, action_results=[{"id": 2}])
+
+        envelope = json.loads(captured["payload"]["input"].split("\n", 1)[1])
+        self.assertEqual(envelope["context_mode"], "embedded")
+        self.assertIn("context", envelope["event"])
+        self.assertEqual(envelope["recent_action_results"], [{"id": 2}])
 
     def test_combat_summary_compact_keeps_key_facts(self):
         facts = {
@@ -275,7 +486,7 @@ class CommonTests(unittest.TestCase):
         ):
             self.assertFalse(hermes_relay.speaker_is_allowed(event))
 
-    def test_unauthorized_event_does_not_call_hermes(self):
+    def test_unauthorized_event_replies_locally_without_calling_hermes(self):
         class FakeDb:
             def scalar_int(self, sql):
                 return 0
@@ -306,19 +517,27 @@ class CommonTests(unittest.TestCase):
                         "PLAYERBOT_HERMES_ALLOWED_PLAYER_GUIDS": "",
                         "PLAYERBOT_HERMES_ALLOWED_ACCOUNTS": "",
                         "PLAYERBOT_HERMES_ALLOW_ALL_PLAYERS": "0",
+                        "PLAYERBOT_HERMES_LISTEN_SCOPE": "group",
                     },
                 ),
                 patch("hermes_relay.log_event") as log_event,
-                patch("hermes_relay.enqueue_action") as enqueue,
+                patch("hermes_relay.enqueue_action", return_value={"action_id": 77, "deduped": False}) as enqueue,
             ):
                 relay.handle_event(event)
 
-            enqueue.assert_not_called()
-            self.assertEqual(log_event.call_args.args[0], "relay_event_unauthorized")
+            enqueue.assert_called_once()
+            kwargs = enqueue.call_args.kwargs
+            self.assertEqual(kwargs["action_type"], "reply")
+            self.assertEqual(kwargs["bot_name"], "瓦小狸")
+            self.assertEqual(kwargs["channel"], "whisper")
+            self.assertIn("欢迎来到树人魔兽", kwargs["text"])
+            self.assertIn("开启白名单", kwargs["text"])
+            self.assertEqual(log_event.call_args_list[0].args[0], "relay_event_unauthorized")
 
     def test_simple_social_reply_text(self):
         self.assertEqual(hermes_relay.simple_social_reply_text("晚上好"), "晚上好，我在。")
         self.assertEqual(hermes_relay.simple_social_reply_text("小狸，在吗？"), "我在。")
+        self.assertEqual(hermes_relay.simple_social_reply_text("在不？"), "我在。")
         self.assertEqual(hermes_relay.simple_social_reply_text("瓦小狸谢谢"), "不客气。")
         self.assertIsNone(hermes_relay.simple_social_reply_text("晚上好，帮我叫队友上线"))
 
@@ -329,6 +548,56 @@ class CommonTests(unittest.TestCase):
         self.assertEqual(hermes_relay.context_control_request("压缩一下对话记忆"), "compress")
         self.assertEqual(hermes_relay.context_control_request("清空上下文"), "reset")
         self.assertEqual(hermes_relay.context_control_request("帮我叫队友上线"), "")
+
+    def test_intrinsic_command_request_only_matches_short_commands(self):
+        self.assertEqual(hermes_relay.intrinsic_command_request("summon"), "summon")
+        self.assertEqual(hermes_relay.intrinsic_command_request("瓦小狸，follow"), "follow")
+        self.assertEqual(hermes_relay.intrinsic_command_request("release!"), "release")
+        self.assertEqual(hermes_relay.intrinsic_command_request("帮我再组一个法师"), "")
+        self.assertEqual(hermes_relay.intrinsic_command_request("summon a mage"), "")
+
+    def test_intrinsic_command_does_not_call_hermes_or_enqueue_actions(self):
+        class FakeDb:
+            def scalar_int(self, sql):
+                return 0
+
+        class FakeClient:
+            def send_event(self, **kwargs):
+                raise AssertionError("intrinsic command should not reach Hermes")
+
+        event = {
+            "id": 89,
+            "channel": "party",
+            "speaker_guid": 556,
+            "speaker_account": 1,
+            "speaker_name": "Wuya",
+            "bot_guid": 20,
+            "bot_name": "瓦小狸",
+            "group_leader_guid": 556,
+            "message": "summon",
+            "context": {"bots": [{"name": "瓦小狸", "bot_kind": "anchor_world"}]},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            relay = hermes_relay.Relay(FakeDb(), FakeClient(), pathlib.Path(tmp) / "state.json")
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "PLAYERBOT_HERMES_ALLOWED_PLAYER_NAMES": "Wuya",
+                        "PLAYERBOT_HERMES_ALLOWED_PLAYER_GUIDS": "",
+                        "PLAYERBOT_HERMES_ALLOWED_ACCOUNTS": "",
+                        "PLAYERBOT_HERMES_ALLOW_ALL_PLAYERS": "0",
+                        "PLAYERBOT_HERMES_LISTEN_SCOPE": "group",
+                    },
+                ),
+                patch("hermes_relay.log_event") as log_event,
+                patch("hermes_relay.enqueue_action") as enqueue,
+            ):
+                relay.handle_event(event)
+
+            enqueue.assert_not_called()
+            self.assertEqual(log_event.call_args.args[0], "fast_intrinsic_command")
 
     def test_context_control_rotates_conversation_epoch(self):
         class FakeDb:
@@ -371,6 +640,12 @@ class CommonTests(unittest.TestCase):
     def test_clean_playerbot_command_rejects_controls(self):
         with self.assertRaises(ValueError):
             server.clean_playerbot_command_line("list\nremove Gessa")
+
+    def test_whisper_event_requires_whisper_reply_channel(self):
+        event = {"channel": "whisper"}
+        self.assertEqual(server.reply_channel_error_for_event(event, "party"), "whisper_event_requires_whisper_reply")
+        self.assertEqual(server.reply_channel_error_for_event(event, "whisper"), "")
+        self.assertEqual(server.reply_channel_error_for_event({"channel": "party"}, "party"), "")
 
     def test_chinese_class_race_gender_normalization(self):
         self.assertEqual(server.normalize_class_hint("牧师", "healer"), "priest")
@@ -505,6 +780,10 @@ class CommonTests(unittest.TestCase):
         self.assertTrue(server.command_requires_admin_audit("reload"))
         self.assertTrue(server.command_requires_admin_audit("initself=epic"))
         self.assertFalse(server.command_requires_admin_audit("remove 黑化观音"))
+
+    def test_autonomy_commands_are_typed_command_candidates(self):
+        for command in ["grind", "equip upgrade", "s gray", "s vendor", "repair", "b vendor", "mail ?", "mail take *"]:
+            self.assertIn(command, server.BOT_COMMANDS)
 
     def test_admin_permission_requires_speaker_gm_level_and_optional_name(self):
         class FakeAuthDb:
@@ -693,12 +972,99 @@ class CommonTests(unittest.TestCase):
         self.assertGreater(len(long_text), 240)
         self.assertEqual(captured["text"], long_text)
 
-    def test_relay_skips_unaddressed_say_only(self):
+    def test_relay_falls_back_when_hermes_returns_text_without_reply(self):
+        event = {
+            "id": 124,
+            "channel": "whisper",
+            "bot_name": "瓦小狸",
+            "target_name": "瓦小狸",
+            "context": {"bots": [{"name": "瓦小狸", "bot_kind": "anchor_world"}]},
+        }
+        captured = {}
+
+        def fake_enqueue_action(db, **kwargs):
+            captured.update(kwargs)
+            return {"ok": True, "action_id": 457}
+
+        relay = object.__new__(hermes_relay.Relay)
+        relay.db = object()
+        with (
+            patch("hermes_relay.enqueue_action", side_effect=fake_enqueue_action),
+            patch("hermes_relay.log_event") as log_event,
+        ):
+            relay.ensure_visible_reply(event, [], hermes_text="瓦小狸：我查到了，先这么办。")
+
+        self.assertEqual(captured["action_type"], "reply")
+        self.assertEqual(captured["channel"], "whisper")
+        self.assertEqual(captured["bot_name"], "瓦小狸")
+        self.assertIn("我查到了", captured["text"])
+        self.assertEqual(log_event.call_args.args[0], "fallback_reply_enqueued")
+        self.assertEqual(log_event.call_args.kwargs["reason"], "hermes_final_text_without_reply")
+
+    def test_relay_ignores_no_action_fallback_text(self):
+        event = {
+            "id": 125,
+            "channel": "whisper",
+            "bot_name": "瓦小狸",
+            "context": {"bots": [{"name": "瓦小狸", "bot_kind": "anchor_world"}]},
+        }
+        relay = object.__new__(hermes_relay.Relay)
+        relay.db = object()
+        with (
+            patch("hermes_relay.enqueue_action") as enqueue,
+            patch("hermes_relay.log_event") as log_event,
+        ):
+            relay.ensure_visible_reply(event, [], hermes_text="no_action")
+
+        enqueue.assert_not_called()
+        self.assertEqual(log_event.call_args.args[0], "fallback_reply_skipped")
+        self.assertEqual(log_event.call_args.kwargs["reason"], "empty_text")
+
+    def test_successful_visible_reply_must_match_expected_channel(self):
+        results = [{"action_type": "reply", "status": "done", "channel": "party"}]
+        self.assertTrue(hermes_relay.successful_visible_reply(results))
+        self.assertFalse(hermes_relay.successful_visible_reply(results, channel="whisper"))
+        self.assertTrue(hermes_relay.successful_visible_reply(results, channel="party"))
+
+    def test_relay_direct_scope_accepts_whisper_and_addressed_world_chat(self):
         with patch.dict(
             "os.environ",
             {
                 "PLAYERBOT_AGENT_ANCHOR_BOT_NAME": "瓦小狸",
                 "PLAYERBOT_AGENT_ANCHOR_ALIASES": "小狸",
+                "PLAYERBOT_HERMES_LISTEN_SCOPE": "direct",
+                "PLAYERBOT_HERMES_IGNORE_UNADDRESSED_SAY": "1",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                hermes_relay.should_skip_event({"channel": "whisper", "message": "帮我看看"}),
+                (False, ""),
+            )
+            self.assertEqual(
+                hermes_relay.should_skip_event({"channel": "say", "message": "小狸，现在谁在线"}),
+                (False, ""),
+            )
+            self.assertEqual(
+                hermes_relay.should_skip_event({"channel": "yell", "message": "瓦小狸，回来"}),
+                (False, ""),
+            )
+            self.assertEqual(
+                hermes_relay.should_skip_event({"channel": "party", "message": "小狸，现在谁在线"}),
+                (True, "outside_listen_scope"),
+            )
+            self.assertEqual(
+                hermes_relay.should_skip_event({"channel": "say", "message": "天气真好"}),
+                (True, "outside_listen_scope"),
+            )
+
+    def test_relay_skips_unaddressed_say_when_scope_allows_world_chat(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "PLAYERBOT_AGENT_ANCHOR_BOT_NAME": "瓦小狸",
+                "PLAYERBOT_AGENT_ANCHOR_ALIASES": "小狸",
+                "PLAYERBOT_HERMES_LISTEN_SCOPE": "all",
                 "PLAYERBOT_HERMES_IGNORE_UNADDRESSED_SAY": "1",
             },
             clear=False,

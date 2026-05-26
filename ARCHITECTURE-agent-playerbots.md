@@ -45,6 +45,8 @@ tools/playerbot-mcp/
 
 2026-05-22 生产运行从 T490 迁到 RT。2026-05-23 生产服继续从 RT 迁到 GJZN。GJZN 现在运行 auth/world 原生 systemd、Hermes 容器、MCP、Hermes relay、注册页和两条 FRP 游戏线路；RT 保留为旧生产/回滚来源。relay 增加 `unprocessed_only` 轮询和 `PLAYERBOT_HERMES_SKIP_BACKLOG_ON_START=1` 积压跳过语义，避免迁移/重启后补跑玩家已经离线的旧事件。`TeamId:uint8` 旧事件 JSON 兼容修复保留在 MCP，同时 C++ 桥已改为输出数值 team。
 
+2026-05-24 relay 增加本能命令 fast-path：`summon`、`follow`、`release` 这类精确短命令不再送 Hermes，也不额外写动作或回复，只记录 `fast_intrinsic_command`，交给 playerbot 原生命令链路消化。同日默认入口收窄为 `PLAYERBOT_HERMES_LISTEN_SCOPE=direct` 和 `PLAYERBOT_HERMES_PAYLOAD_MODE=minimal`：只监听 whisper 与点名 say/yell，每轮只给当前消息基础字段；战斗、位置、队伍、任务和游戏环境改为 Hermes 按需通过 MCP 查询。未授权 direct 事件本地回复白名单提示，不进入 Hermes。
+
 核心分层：
 
 ```text
