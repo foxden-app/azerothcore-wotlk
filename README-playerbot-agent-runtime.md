@@ -66,6 +66,10 @@ GJZN 本机 `xray.service` 保留为备用，监听 `127.0.0.1:20170/20171`，�
 - Hermes API：`8642`
 - MCP：`18765`
 - 账号注册页：`18080`，只监听 `127.0.0.1`
+- 敏捷测试 world：`127.0.0.1:8086`，公网 `38.207.189.99:8086`
+- 敏捷测试 SOAP：`127.0.0.1:7880`
+- 敏捷测试 MCP：`127.0.0.1:18766`
+- 敏捷测试 Hermes API/dashboard：`127.0.0.1:8643` / `127.0.0.1:9120`
 
 数据库：
 
@@ -73,12 +77,15 @@ GJZN 本机 `xray.service` 保留为备用，监听 `127.0.0.1:20170/20171`，�
 - PlayerBot world 库：`acore_playerbot_world`
 - PlayerBot 角色库：`acore_playerbot_characters`
 - Playerbots 模块库：`acore_playerbots`
+- 敏捷测试库：共享 `acore_auth`，独立 `acore_dev_world`、`acore_dev_characters`、`acore_dev_playerbots`
 
 Realm：
 
 - `id=1`：`线路一`，`38.207.189.99:8085`
 - `id=2`：`线路二`，`8.162.5.68:8085`
+- `id=3`：`敏捷测试`，`38.207.189.99:8086`，`allowedSecurityLevel=3`
 - 两个 realm 通过 `RealmList.RealmIDAliases = "2:1"` 指向同一个 worldserver。
+  `id=3` 不配置 alias，独立指向 dev world 的 `RealmID=3`。
 
 ## 当前调优
 

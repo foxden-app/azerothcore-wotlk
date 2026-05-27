@@ -1,0 +1,23 @@
+[Unit]
+Description=AzerothCore DEV PlayerBot Hermes Event Relay
+After=network-online.target mysql.service azerothcore-dev-world.service azerothcore-dev-playerbot-mcp.service azerothcore-dev-hermes-wow.service
+Wants=network-online.target mysql.service azerothcore-dev-world.service azerothcore-dev-playerbot-mcp.service azerothcore-dev-hermes-wow.service
+
+[Service]
+Type=simple
+User=wuya
+Group=wuya
+WorkingDirectory=/home/wuya/git/azerothcore-wotlk-dev
+Environment=PATH=/home/wuya/git/azerothcore-wotlk-dev/var/playerbot-mcp-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/home/wuya/git/azerothcore-wotlk-dev/env/dist/etc/playerbot-hermes-relay-dev.env
+ExecStartPre=/usr/bin/mkdir -p /home/wuya/git/azerothcore-wotlk-dev/env/dist/logs /home/wuya/git/azerothcore-wotlk-dev/var/playerbot-hermes-relay-dev
+ExecStart=/home/wuya/git/azerothcore-wotlk-dev/var/playerbot-mcp-venv/bin/python /home/wuya/git/azerothcore-wotlk-dev/tools/playerbot-mcp/hermes_relay.py
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+StandardOutput=append:/home/wuya/git/azerothcore-wotlk-dev/env/dist/logs/playerbot-hermes-relay-dev.log
+StandardError=append:/home/wuya/git/azerothcore-wotlk-dev/env/dist/logs/playerbot-hermes-relay-dev.log
+
+[Install]
+WantedBy=multi-user.target

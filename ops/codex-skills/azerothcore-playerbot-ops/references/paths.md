@@ -2,7 +2,7 @@
 
 ## Development Machine
 
-- Current dev checkout: `/home/wuya/git_wsl/azerothcore-wotlk`
+- Current dev checkout: `/home/wuya/git/azerothcore-wotlk-dev`
 - Repo skill source: `ops/codex-skills/azerothcore-playerbot-ops`
 - Installed Codex skill target: `${CODEX_HOME:-/mnt/c/Users/chuan/.codex}/skills/azerothcore-playerbot-ops`
 - GJZN runbook: `ops/gjzn-bootstrap/README.md`
@@ -47,12 +47,17 @@ GJZN services:
 - `hermes-wow`: Hermes API container, port `8642`
 - `frpc-acore-main.service`: public line 1
 - `frpc-chml-unicom.service`: public line 2
+- `azerothcore-dev-world.service`: agile dev world, `127.0.0.1:8086`, SOAP `127.0.0.1:7880`
+- `frpc-acore-dev.service`: agile dev world public proxy, `38.207.189.99:8086`
 
 GJZN systemd sidecars:
 
 - `azerothcore-playerbot-mcp.service`: MCP, port `18765`
 - `azerothcore-playerbot-hermes-relay.service`: event relay
 - `azerothcore-account-register.service`: registration page, `127.0.0.1:18080`
+- `azerothcore-dev-playerbot-mcp.service`: dev MCP, `127.0.0.1:18766`
+- `azerothcore-dev-hermes-wow.service`: dev Hermes, `127.0.0.1:8643`, dashboard `127.0.0.1:9120`
+- `azerothcore-dev-playerbot-hermes-relay.service`: dev event relay
 
 GJZN databases:
 
@@ -65,7 +70,9 @@ Realms:
 
 - `id=1`, `线路一`, `38.207.189.99:8085`
 - `id=2`, `线路二`, `8.162.5.68:8085`
+- `id=3`, `敏捷测试`, `38.207.189.99:8086`, `allowedSecurityLevel=3`
 - `RealmList.RealmIDAliases = "2:1"`
+- Do not alias `3`; dev world runs with `RealmID=3`.
 - Both realms use `flag=0`, `timezone=16`, `localSubnetMask=255.255.255.255`, build `12340`
 
 GJZN production config facts:

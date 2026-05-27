@@ -1,0 +1,23 @@
+[Unit]
+Description=AzerothCore DEV Auth Server
+After=network-online.target mysql.service
+Wants=network-online.target mysql.service
+
+[Service]
+Type=simple
+User=wuya
+Group=wuya
+WorkingDirectory=/home/wuya/git/azerothcore-wotlk-dev/env/dist/bin
+ExecStart=/home/wuya/git/azerothcore-wotlk-dev/env/dist/bin/authserver --config /home/wuya/git/azerothcore-wotlk-dev/env/dist/etc/authserver.conf
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=90
+LimitNOFILE=65535
+Nice=10
+CPUWeight=25
+IOWeight=25
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

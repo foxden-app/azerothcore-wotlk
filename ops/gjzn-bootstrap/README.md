@@ -62,6 +62,10 @@ Host GJZN-public
 - `azerothcore-account-register.service`：注册页，`127.0.0.1:18080`
 - `frpc-acore-main.service`：线路一公网 `38.207.189.99:3724/8085`
 - `frpc-chml-unicom.service`：线路二公网 `8.162.5.68:8085`，备用 auth `8.162.5.68:8724`
+- `azerothcore-dev-world.service`：敏捷测试 world，`127.0.0.1:8086`，SOAP `127.0.0.1:7880`
+- `azerothcore-dev-playerbot-mcp.service` / `azerothcore-dev-playerbot-hermes-relay.service`：敏捷测试 Agent 链路
+- `azerothcore-dev-hermes-wow.service`：敏捷测试 Hermes，API `127.0.0.1:8643`，dashboard `127.0.0.1:9120`
+- `frpc-acore-dev.service`：敏捷测试公网 world `38.207.189.99:8086`
 - `frpc-gjzn.service`：GJZN 公网 SSH `38.207.189.99:8026`
 
 生产数据库在 GJZN 本机 MySQL：
@@ -71,6 +75,9 @@ acore_auth
 acore_playerbot_world
 acore_playerbot_characters
 acore_playerbots
+acore_dev_world
+acore_dev_characters
+acore_dev_playerbots
 ```
 
 RT 已退为旧生产/回滚来源：RT auth/world、MCP、relay、注册页、Hermes 已停；RT 主 `frpc.service` 保留非游戏代理，游戏端口 3724/8085 已移除；RT 线路二 `frpc-chml-unicom.service` 已停。

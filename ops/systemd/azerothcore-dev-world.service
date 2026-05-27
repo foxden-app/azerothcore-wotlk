@@ -1,0 +1,28 @@
+[Unit]
+Description=AzerothCore DEV World Server
+After=network-online.target mysql.service azerothcore-auth.service
+Wants=network-online.target mysql.service
+
+[Service]
+Type=simple
+User=wuya
+Group=wuya
+WorkingDirectory=/home/wuya/git/azerothcore-wotlk-dev/env/dist/bin
+ExecStart=/home/wuya/git/azerothcore-wotlk-dev/env/dist/bin/worldserver --config /home/wuya/git/azerothcore-wotlk-dev/env/dist/etc/worldserver.conf
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=120
+LimitNOFILE=65535
+Nice=10
+CPUWeight=50
+IOWeight=50
+MemoryMax=8G
+ReadOnlyPaths=/home/wuya/git/azerothcore-wotlk-git/env/dist/bin/Cameras
+ReadOnlyPaths=/home/wuya/git/azerothcore-wotlk-git/env/dist/bin/dbc
+ReadOnlyPaths=/home/wuya/git/azerothcore-wotlk-git/env/dist/bin/maps
+ReadOnlyPaths=/home/wuya/git/azerothcore-wotlk-git/env/dist/bin/mmaps
+ReadOnlyPaths=/home/wuya/git/azerothcore-wotlk-git/env/dist/bin/vmaps
+
+[Install]
+WantedBy=multi-user.target

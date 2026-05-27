@@ -1,0 +1,10 @@
+serverAddr = "38.207.189.99"
+serverPort = 1170
+auth.token = "__FRP_TOKEN__"
+
+[[proxies]]
+name = "azerothcore-gjzn-dev-world-8086"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8086
+remotePort = 8086

@@ -19,12 +19,14 @@ Production shape:
 - GJZN runs `hermes-wow` as a Docker container from `/home/wuya/srv/hermes-wow/docker-compose.yml`.
 - GJZN runs MCP, Hermes relay, and account register as systemd services.
 - GJZN runs public game FRP with `frpc-acore-main.service` and `frpc-chml-unicom.service`.
+- GJZN also has an agile dev line from `/home/wuya/git/azerothcore-wotlk-dev`: shared production auth `3724`, dev realm `id=3`/`敏捷测试` at `38.207.189.99:8086` with `allowedSecurityLevel=3`, dev world `127.0.0.1:8086`, dev SOAP `127.0.0.1:7880`, dev MCP `127.0.0.1:18766`, dev Hermes `127.0.0.1:8643`, and dev relay against `acore_dev_playerbots`.
 - GJZN uses wired `eno1` for production. WiFi autoconnect is disabled.
 - RT is the default foreign-network proxy for GJZN tools: HTTP `192.168.1.179:20171`, SOCKS `192.168.1.179:20170`.
 - GJZN foxclaw/Codex uses `/home/wuya/.foxclaw/.env` plus `/home/wuya/.config/systemd/user/foxclaw.service.d/10-rt-proxychains.conf` to route Telegram and Codex traffic through RT. GJZN local `xray.service` remains only as fallback on `127.0.0.1:20170/20171`.
 - AzerothCore auth/world and game FRP services do not use proxy env vars. Do not import proxy variables into systemd global environment.
 - Public realms: `线路一 -> 38.207.189.99:8085`, `线路二 -> 8.162.5.68:8085`.
 - Auth alias: `RealmList.RealmIDAliases = "2:1"`; both realms point to the same worldserver.
+- Dev realm `id=3` must not be added to `RealmList.RealmIDAliases`; it is a separate worldserver with `RealmID=3`.
 - Production DBs on GJZN MySQL: `acore_auth`, `acore_playerbot_world`, `acore_playerbot_characters`, `acore_playerbots`.
 
 RT is now legacy/rollback for WoW:
