@@ -30,6 +30,18 @@ LLM / Harness 只调度低频本能。
 高频战斗、治疗、坦克、移动、躲技能仍由 mod-playerbots 小脑处理。
 ```
 
+## Heuristic Learning 迭代流程
+
+基于 [Learning Beyond Gradients](https://trinkle23897.github.io/learning-beyond-gradients/) 的 Heuristic Learning 思路，PlayerBot Agent 后续不把每次失败当成一次性 prompt 修补，而是当成 Heuristic System 的样本更新。
+
+流程真相源见：[AGENT-HEURISTIC-LEARNING.md](AGENT-HEURISTIC-LEARNING.md)。每轮 Agent 迭代默认先导出 trial，再分层判断失败属于状态读取、Planner、Adapter、执行器、本能、记忆还是基础设施，最后把修复固化成测试、typed tool、规则或压缩后的 prompt 约束。
+
+最小样本导出命令：
+
+```bash
+python3 tools/playerbot-mcp/export_hl_trial.py --event-id <id> --pretty
+```
+
 ## 分层设计
 
 ```text

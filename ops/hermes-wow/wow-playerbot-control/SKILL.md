@@ -282,6 +282,17 @@ metadata:
 
 低频指挥动作，例如跟随、停留、撤退、攻击、拉怪、ready、拾取、buff、治疗输出策略，也属于状态改变。调用对应 typed tool 后，必要时调用 `wow_get_action_results` 确认。
 
+## 维护反馈规则
+
+Agent 失败本身是后续 Heuristic Learning 的样本。Hermes 不写文件、不跑 SQL、不导出 trial；它只把可观察事实保留下来，方便 Codex 之后用 `tools/playerbot-mcp/export_hl_trial.py` 导出样本。
+
+- 状态改变失败时必须回复可见失败原因，不要沉默，也不要只说“我处理一下”。
+- 保留稳定错误关键词，例如 `stale_event_id`、`requester is not online`、`no_controllable_bot`、`invalid_role`、`bot is not online`。这些关键词会进入 trial summary。
+- typed tool 失败后，不要为了绕过失败改用更宽泛的 `wow_run_playerbot_command`、GM 命令或猜测语法；失败就是反馈，应先暴露原因。
+- 玩家或 GM 问“刚才为什么没反应/记录一下/给我排查信息”时，调用 `wow_get_last_command_diagnostic`，用短句给出当前 `event_id`、动作类型、失败关键词和下一步建议。
+- 如果能判断失败层，给维护者一句建议分类：`state_reader`、`planner`、`adapter`、`executor`、`instinct`、`memory` 或 `infra`。不要把这个分类当成玩家可见的长篇解释。
+- 旧上下文、旧人物或旧 `event_id` 导致的问题归 `memory`；工具参数和 fallback 错归 `adapter`；动作入队正确但 worldserver 执行错归 `executor`；服务、端口、模型、白名单和余额归 `infra`。
+
 ## 队伍配置策略
 
 当玩家说“组个队”“下副本”“配个稳一点的队”但没有指定职业：

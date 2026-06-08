@@ -4,6 +4,8 @@
 
 Harness / Planner Agent、Intent 接口和阶段路线图见：[ROADMAP-agent-playerbots.md](/home/wuya/git/azerothcore-wotlk-git/ROADMAP-agent-playerbots.md)。
 
+基于 Heuristic Learning 的可回放迭代闭环见：[AGENT-HEURISTIC-LEARNING.md](AGENT-HEURISTIC-LEARNING.md)。
+
 本分支当前目标：先把成熟的 `mod-playerbots` 跑成稳定的“机器人本能层”，再接入 LLM-Agent 做中文聊天理解、队伍意图识别和宏观调度。
 
 ## 当前状态
