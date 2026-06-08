@@ -8,6 +8,7 @@ Type=simple
 User=wuya
 Group=wuya
 WorkingDirectory=/home/wuya/git/azerothcore-wotlk-dev/env/dist/bin
+Environment=AC_PLAYERBOTS_DATABASE_INFO=127.0.0.1;3306;acore;acore;acore_dev_playerbots
 ExecStart=/home/wuya/git/azerothcore-wotlk-dev/env/dist/bin/worldserver --config /home/wuya/git/azerothcore-wotlk-dev/env/dist/etc/worldserver.conf
 Restart=on-failure
 RestartSec=5

@@ -14,6 +14,11 @@ accounts can enter the test line from the normal public realmlist.
 - Dev Agent: MCP `127.0.0.1:18766`, Hermes `127.0.0.1:8643`,
   dashboard `127.0.0.1:9120`, relay state under this checkout's `var/`
 
+The dev world service also sets `AC_PLAYERBOTS_DATABASE_INFO` to
+`acore_dev_playerbots`. Keep this service-level override in place: it is the
+guard that prevents the dev world from polling the production
+`agent_playerbot_actions` queue.
+
 Useful commands:
 
 ```bash

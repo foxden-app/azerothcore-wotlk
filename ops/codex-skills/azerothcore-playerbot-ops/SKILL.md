@@ -11,8 +11,8 @@ GJZN is production and the primary development host. Keep development and produc
 
 Production shape:
 
-- GJZN LAN SSH: `ssh GJZN-local` / `wuya@192.168.1.203`. Use this for repo/skill syncs and large transfers when on the LAN.
-- GJZN public SSH: `ssh GJZN` or `ssh GJZN-public` / `wuya@38.207.189.99 -p 8026`.
+- Codex usually runs on GJZN itself. If `hostname` is `GJZN`, use local commands directly; do not SSH from GJZN back into GJZN.
+- Remote access from another host: LAN `ssh GJZN` / `wuya@192.168.1.203`; public `ssh GJZN-public` / `wuya@38.207.189.99 -p 8026`.
 - GJZN development root: `/home/wuya/git/azerothcore-wotlk-dev`.
 - GJZN runtime root: `/home/wuya/git/azerothcore-wotlk-git`.
 - GJZN runs `azerothcore-auth.service` and `azerothcore-world.service` natively under systemd.
@@ -40,10 +40,13 @@ RT is now legacy/rollback for WoW:
 Primary production checks:
 
 ```bash
-ssh GJZN 'systemctl is-active azerothcore-auth.service azerothcore-world.service azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service frpc-acore-main.service frpc-chml-unicom.service mysql docker xray'
-ssh GJZN 'ss -ltnp | egrep ":(3724|8085|7879|8642|18765|18080)\b" || true'
-ssh GJZN 'docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
+hostname
+systemctl is-active azerothcore-auth.service azerothcore-world.service azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service frpc-acore-main.service frpc-chml-unicom.service mysql docker xray
+ss -ltnp | egrep ":(3724|8085|7879|8642|18765|18080)\b" || true
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 ```
+
+Only wrap these commands in `ssh GJZN '...'` when the current `hostname` is not `GJZN` or when explicitly testing SSH access.
 
 `ops/rt-wow-migration/deploy.sh` still targets RT by default. Do not use it for GJZN production until it is updated for the native GJZN topology.
 
@@ -53,8 +56,9 @@ Before changing anything:
 
 ```bash
 pwd
+hostname
 git status --short --branch
-ssh GJZN 'hostname; systemctl is-active azerothcore-world.service azerothcore-playerbot-hermes-relay.service frpc-acore-main.service frpc-chml-unicom.service'
+systemctl is-active azerothcore-world.service azerothcore-playerbot-hermes-relay.service frpc-acore-main.service frpc-chml-unicom.service
 ```
 
 If investigating a player report like “瓦小狸不说话”:
@@ -79,7 +83,7 @@ Talent and GM-operation truth:
 Useful targeted query:
 
 ```bash
-ssh GJZN 'MYSQL_PWD=acore mysql -uacore -h127.0.0.1 -e "
+MYSQL_PWD=acore mysql -uacore -h127.0.0.1 -e "
   SELECT id,speaker_name,message,created_at,processed_at
   FROM acore_playerbots.agent_playerbot_events
   ORDER BY id DESC LIMIT 12;
@@ -90,7 +94,7 @@ ssh GJZN 'MYSQL_PWD=acore mysql -uacore -h127.0.0.1 -e "
   FROM acore_playerbot_characters.characters
   WHERE name IN (\"瓦小狸\",\"小德\",\"Wuya\")
   ORDER BY name;
-"'
+"
 ```
 
 ## New Player Starter Gifts
@@ -100,12 +104,12 @@ Use worldserver SOAP GM commands for starter gifts, especially when the player i
 Before granting anything, query the target character and confirm class, faction, level, current money, and online state. Replace `火球树` with the actual character name:
 
 ```bash
-ssh GJZN 'MYSQL_PWD=acore mysql -uacore -h127.0.0.1 -N -B -e "
+MYSQL_PWD=acore mysql -uacore -h127.0.0.1 -N -B -e "
   SELECT c.guid,c.name,c.race,c.class,c.level,c.money,c.online,c.account,a.username
   FROM acore_playerbot_characters.characters c
   LEFT JOIN acore_auth.account a ON a.id=c.account
   WHERE c.name=\"火球树\";
-"'
+"
 ```
 
 Known starter gift baseline:
@@ -118,15 +122,21 @@ Known starter gift baseline:
 Grant the starter gift through the existing SOAP helper on GJZN. Keep the GM password in `/home/wuya/.config/acore/gm.env` and do not print it:
 
 ```bash
-ssh GJZN 'set -a; . /home/wuya/.config/acore/gm.env; set +a; /home/wuya/git/azerothcore-wotlk-git/ops/codex-skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh gm '\''send items 火球树 "新手礼包：法师传家宝" "欢迎来到艾泽拉斯。这封邮件包含法师传家宝、联盟徽记和4个弗洛尔的无尽抗性宝箱。" 42947 42985 48691 42992 44098 23162:4'\'''
-ssh GJZN 'set -a; . /home/wuya/.config/acore/gm.env; set +a; /home/wuya/git/azerothcore-wotlk-git/ops/codex-skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh gm '\''send money 火球树 "新手礼包：启动资金" "这是给新角色的100金启动资金。" 1000000'\'''
+set -a
+. /home/wuya/.config/acore/gm.env
+set +a
+/home/wuya/git/azerothcore-wotlk-git/ops/codex-skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh gm 'send items 火球树 "新手礼包：法师传家宝" "欢迎来到艾泽拉斯。这封邮件包含法师传家宝、联盟徽记和4个弗洛尔的无尽抗性宝箱。" 42947 42985 48691 42992 44098 23162:4'
+/home/wuya/git/azerothcore-wotlk-git/ops/codex-skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh gm 'send money 火球树 "新手礼包：启动资金" "这是给新角色的100金启动资金。" 1000000'
 ```
 
 Verify with both the GM mail view and a narrow SQL check:
 
 ```bash
-ssh GJZN 'set -a; . /home/wuya/.config/acore/gm.env; set +a; /home/wuya/git/azerothcore-wotlk-git/ops/codex-skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh gm '\''mail list 火球树'\'''
-ssh GJZN 'MYSQL_PWD=acore mysql -uacore -h127.0.0.1 -t -e "
+set -a
+. /home/wuya/.config/acore/gm.env
+set +a
+/home/wuya/git/azerothcore-wotlk-git/ops/codex-skills/azerothcore-playerbot-ops/scripts/acore-playerbot-ops.sh gm 'mail list 火球树'
+MYSQL_PWD=acore mysql -uacore -h127.0.0.1 -t -e "
   SELECT m.id,m.subject,m.has_items,m.money,FROM_UNIXTIME(m.deliver_time) AS deliver_at
   FROM acore_playerbot_characters.mail m
   JOIN acore_playerbot_characters.characters c ON c.guid=m.receiver
@@ -141,7 +151,7 @@ ssh GJZN 'MYSQL_PWD=acore mysql -uacore -h127.0.0.1 -t -e "
   WHERE c.name=\"火球树\"
   ORDER BY mi.mail_id DESC,ii.itemEntry,mi.item_guid
   LIMIT 20;
-"'
+"
 ```
 
 ## Deploy Rules
@@ -150,10 +160,10 @@ Sidecar-only changes include `tools/playerbot-mcp/`, `tools/account-register/`, 
 
 ```bash
 python3 -m py_compile tools/playerbot-mcp/wow_common.py tools/playerbot-mcp/hermes_relay.py tools/playerbot-mcp/server.py
-rsync -az tools/playerbot-mcp/ GJZN:/home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/
-rsync -az tools/account-register/ GJZN:/home/wuya/git/azerothcore-wotlk-git/tools/account-register/
-ssh GJZN 'sudo systemctl restart azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service'
-ssh GJZN '/home/wuya/git/azerothcore-wotlk-git/var/playerbot-mcp-venv/bin/python -m unittest /home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/test_playerbot_mcp.py'
+rsync -az tools/playerbot-mcp/ /home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/
+rsync -az tools/account-register/ /home/wuya/git/azerothcore-wotlk-git/tools/account-register/
+sudo systemctl restart azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service
+/home/wuya/git/azerothcore-wotlk-git/var/playerbot-mcp-venv/bin/python -m unittest /home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/test_playerbot_mcp.py
 ```
 
 C++/world changes include `modules/mod-playerbot-agent/`, core code, `modules/mod-playerbots/`, SQL source, or runtime binary changes. These require a local build and `env/dist/bin/authserver` plus `env/dist/bin/worldserver`.
@@ -162,7 +172,7 @@ C++/world changes include `modules/mod-playerbot-agent/`, core code, `modules/mo
 
 ```bash
 rsync -az --delete --exclude='.git/' \
-  GJZN:/home/wuya/git/azerothcore-wotlk-git/modules/mod-playerbots/ \
+  /home/wuya/git/azerothcore-wotlk-git/modules/mod-playerbots/ \
   modules/mod-playerbots/
 ```
 
@@ -202,17 +212,17 @@ The old `deploy-world` backs up RT DBs and deploys to RT containers. It is not t
 GJZN service checks:
 
 ```bash
-ssh GJZN 'systemctl is-active azerothcore-auth.service azerothcore-world.service azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service'
-ssh GJZN 'ss -ltnp | egrep ":(3724|8085|7879|8642|18765|18080)\b" || true'
-ssh GJZN 'docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
+systemctl is-active azerothcore-auth.service azerothcore-world.service azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service
+ss -ltnp | egrep ":(3724|8085|7879|8642|18765|18080)\b" || true
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 ```
 
 Prefer compact logs:
 
 ```bash
-ssh GJZN 'journalctl -u azerothcore-world.service -u azerothcore-playerbot-mcp.service -u azerothcore-playerbot-hermes-relay.service -n 160 --no-pager'
-ssh GJZN 'tail -120 /home/wuya/git/azerothcore-wotlk-git/env/dist/logs/playerbot-mcp.log'
-ssh GJZN 'docker logs --tail 160 hermes-wow'
+journalctl -u azerothcore-world.service -u azerothcore-playerbot-mcp.service -u azerothcore-playerbot-hermes-relay.service -n 160 --no-pager
+tail -120 /home/wuya/git/azerothcore-wotlk-git/env/dist/logs/playerbot-mcp.log
+docker logs --tail 160 hermes-wow
 ```
 
 Do not print full env files, Hermes config, bearer tokens, API keys, DB passwords, SOAP passwords, or full raw relay JSON. Redact secrets and use narrow `rg`/SQL selections.

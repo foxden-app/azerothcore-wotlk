@@ -6,7 +6,8 @@ GJZN（龟机智能）是新的 i7 机器。2026-05-23 已从 RT 接管 AzerothC
 
 ## 主机信息
 
-- SSH：`ssh GJZN`
+- 本机执行：Codex/运维 shell 在 GJZN 上时，`hostname` 为 `GJZN`，直接运行本地命令。
+- SSH：仅从其他机器连入 GJZN 时使用。
 - LAN SSH：`ssh GJZN`，当前地址 `192.168.1.203`
 - 公网 SSH：`ssh GJZN-public`，`38.207.189.99:8026`
 - 用户：`wuya`
@@ -103,12 +104,15 @@ GJZN 已按无图形服务器方式配置：
 常用检查：
 
 ```bash
-ssh GJZN 'systemctl get-default'
-ssh GJZN 'systemctl is-active ssh docker xray'
-ssh GJZN 'systemctl is-enabled ssh docker xray'
-ssh GJZN 'nmcli -t -f NAME,DEVICE,TYPE,AUTOCONNECT connection show --active'
-ssh GJZN 'free -h && swapon --show && df -h /'
-ssh GJZN 'docker info | egrep "HTTP Proxy|HTTPS Proxy|No Proxy"'
+hostname
+systemctl get-default
+systemctl is-active ssh docker xray
+systemctl is-enabled ssh docker xray
+nmcli -t -f NAME,DEVICE,TYPE,AUTOCONNECT connection show --active
+free -h
+swapon --show
+df -h /
+docker info | egrep "HTTP Proxy|HTTPS Proxy|No Proxy"
 ```
 
 2026-05-23 已做首次重启验证：
@@ -165,9 +169,9 @@ git config --global https.proxy http://192.168.1.179:20171
 已验证：
 
 ```bash
-ssh GJZN 'curl -I -x http://192.168.1.179:20171 https://api.openai.com/v1/models'
-ssh GJZN 'proxychains4 -f /home/wuya/.proxychains-rt.conf curl -I https://api.telegram.org'
-ssh GJZN 'git -C /home/wuya/git/azerothcore-wotlk-git fetch foxden-app playerbot-agent'
+curl -I -x http://192.168.1.179:20171 https://api.openai.com/v1/models
+proxychains4 -f /home/wuya/.proxychains-rt.conf curl -I https://api.telegram.org
+git -C /home/wuya/git/azerothcore-wotlk-git fetch foxden-app playerbot-agent
 ```
 
 不要把 `/home/wuya/.xray/config.json`、订阅信息、token、代理节点、foxclaw `.env` 或任何密钥写进仓库。

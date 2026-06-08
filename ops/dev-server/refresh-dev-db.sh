@@ -35,7 +35,7 @@ done
 INSERT INTO realmlist
   (id, name, address, localAddress, localSubnetMask, port, icon, flag, timezone, allowedSecurityLevel, population, gamebuild)
 VALUES
-  (3, '敏捷测试', '38.207.189.99', '127.0.0.1', '255.255.255.255', 8086, 0, 0, 16, 3, 0, 12340)
+  (3, '敏捷测试', '38.207.189.99', '38.207.189.99', '255.255.255.255', 8086, 0, 0, 16, 3, 0, 12340)
 ON DUPLICATE KEY UPDATE
   name = VALUES(name),
   address = VALUES(address),

@@ -31,9 +31,10 @@ Tencent Docs:
 
 ## GJZN Production
 
-- LAN SSH: `ssh GJZN`
-- Public SSH: `ssh GJZN-public`
-- LAN address: `192.168.1.248`
+- Local execution: when `hostname` is `GJZN`, run local service, Docker, MySQL, and log commands directly.
+- LAN SSH from another host: `ssh GJZN`
+- Public SSH from another host: `ssh GJZN-public`
+- LAN address: `192.168.1.203`
 - GJZN runtime root: `/home/wuya/git/azerothcore-wotlk-git`
 - Hermes compose path: `/home/wuya/srv/hermes-wow/docker-compose.yml`
 - Runtime files: `/home/wuya/git/azerothcore-wotlk-git/env/dist`
