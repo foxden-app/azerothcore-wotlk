@@ -656,8 +656,12 @@ bool WorldSession::CheckStableMaster(ObjectGuid guid)
     {
         if (!GetPlayer()->IsGameMaster() && !GetPlayer()->HasOpenStableAura())
         {
-            LOG_DEBUG("network.opcode", "Player ({}) attempt open stable in cheating way.", guid.ToString());
-            return false;
+            Player* player = GetPlayer();
+            if (player->getClass() != CLASS_HUNTER || !player->IsAlive() || player->IsInCombat() || player->InBattleground() || player->InArena())
+            {
+                LOG_DEBUG("network.opcode", "Player ({}) attempt open portable stable in invalid state.", guid.ToString());
+                return false;
+            }
         }
     }
     // stable master case

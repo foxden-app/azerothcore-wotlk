@@ -34,7 +34,9 @@ enum PetType : uint8
     MAX_PET_TYPE                = 4
 };
 
-constexpr auto MAX_PET_STABLES = 4;
+constexpr auto MAX_PET_STABLES = 12;
+constexpr auto DEFAULT_HUNTER_STABLE_SLOTS = MAX_PET_STABLES;
+constexpr uint32 EXTENDED_STABLE_SLOT_PRICE = 1000000;
 
 // stored in character_pet.slot
 enum PetSaveMode : int8

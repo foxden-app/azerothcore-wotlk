@@ -368,6 +368,12 @@ void WorldSession::SendStablePet(ObjectGuid guid)
         return;
     }
 
+    if (petStable->MaxStabledPets > 4)
+    {
+        GetPlayer()->SendSystemMessage("Stable UI shows only the first 4 slots.");
+        GetPlayer()->SendSystemMessage("Extra pets: .pet stable list, .pet stable store, .pet stable call <slot>");
+    }
+
     data << uint8(petStable->MaxStabledPets);
 
     uint8 num = 0;                                          // counter for place holder
@@ -623,11 +629,18 @@ void WorldSession::HandleBuyStableSlot(WorldPacket& recvData)
     PetStable& petStable = GetPlayer()->GetOrInitPetStable();
     if (petStable.MaxStabledPets < MAX_PET_STABLES)
     {
-        StableSlotPricesEntry const* SlotPrice = sStableSlotPricesStore.LookupEntry(petStable.MaxStabledPets + 1);
-        if (_player->HasEnoughMoney(SlotPrice->Price))
+        uint32 const slotPrice = [&petStable]() -> uint32
+        {
+            if (StableSlotPricesEntry const* price = sStableSlotPricesStore.LookupEntry(petStable.MaxStabledPets + 1))
+                return price->Price;
+
+            return EXTENDED_STABLE_SLOT_PRICE;
+        }();
+
+        if (_player->HasEnoughMoney(slotPrice))
         {
             ++petStable.MaxStabledPets;
-            _player->ModifyMoney(-int32(SlotPrice->Price));
+            _player->ModifyMoney(-int32(slotPrice));
             SendStableResult(STABLE_SUCCESS_BUY_SLOT);
         }
         else

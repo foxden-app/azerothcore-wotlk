@@ -18,9 +18,59 @@
 #include "Player.h"
 #include "PlayerScript.h"
 
+enum HunterStableWhistle
+{
+    ITEM_LEGACY_HUNTER_STABLE_WHISTLE = 900001,
+    ITEM_HUNTER_STABLE_WHISTLE = 900002,
+    HUNTER_STABLE_WHISTLE_REQUIRED_LEVEL = 10
+};
+
 enum ApprenticeAnglerQuestEnum
 {
     QUEST_APPRENTICE_ANGLER = 8194
+};
+
+class HunterStableWhistlePlayerScript : public PlayerScript
+{
+public:
+    HunterStableWhistlePlayerScript() : PlayerScript("HunterStableWhistlePlayerScript", { PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_LEVEL_CHANGED })
+    {
+    }
+
+    void OnPlayerLogin(Player* player) override
+    {
+        GiveWhistleIfNeeded(player);
+    }
+
+    void OnPlayerLevelChanged(Player* player, uint8 /*oldlevel*/) override
+    {
+        GiveWhistleIfNeeded(player);
+    }
+
+private:
+    static void GiveWhistleIfNeeded(Player* player)
+    {
+        if (player->getClass() != CLASS_HUNTER || player->GetLevel() < HUNTER_STABLE_WHISTLE_REQUIRED_LEVEL)
+            return;
+
+        uint32 legacyCount = player->GetItemCount(ITEM_LEGACY_HUNTER_STABLE_WHISTLE, true);
+        if (legacyCount)
+            player->DestroyItemCount(ITEM_LEGACY_HUNTER_STABLE_WHISTLE, legacyCount, true);
+
+        if (player->HasItemCount(ITEM_HUNTER_STABLE_WHISTLE, 1, true))
+            return;
+
+        ItemPosCountVec dest;
+        InventoryResult msg = player->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, ITEM_HUNTER_STABLE_WHISTLE, 1);
+        if (msg != EQUIP_ERR_OK)
+        {
+            player->SendSystemMessage("Your bags are full. Make room to receive the Stable Master's Whistle.");
+            return;
+        }
+
+        player->StoreNewItem(dest, ITEM_HUNTER_STABLE_WHISTLE, true);
+        player->SendSystemMessage("Stable Master's Whistle added to your bags.");
+    }
 };
 
 class QuestApprenticeAnglerPlayerScript : public PlayerScript
@@ -68,5 +118,6 @@ public:
 
 void AddSC_player_scripts()
 {
+    new HunterStableWhistlePlayerScript();
     new QuestApprenticeAnglerPlayerScript();
 }

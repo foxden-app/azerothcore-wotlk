@@ -15722,7 +15722,13 @@ bool Player::AddItem(uint32 itemId, uint32 count)
 PetStable& Player::GetOrInitPetStable()
 {
     if (!m_petStable)
+    {
         m_petStable = std::make_unique<PetStable>();
+        if (getClass() == CLASS_HUNTER)
+            m_petStable->MaxStabledPets = DEFAULT_HUNTER_STABLE_SLOTS;
+    }
+    else if (getClass() == CLASS_HUNTER && m_petStable->MaxStabledPets < DEFAULT_HUNTER_STABLE_SLOTS)
+        m_petStable->MaxStabledPets = DEFAULT_HUNTER_STABLE_SLOTS;
 
     return *m_petStable;
 }
@@ -15957,11 +15963,14 @@ void Player::_LoadBrewOfTheMonth(PreparedQueryResult result)
 
 void Player::_LoadPetStable(uint8 petStableSlots, PreparedQueryResult result)
 {
-    if (!petStableSlots && !result)
+    if (!petStableSlots && !result && getClass() != CLASS_HUNTER)
         return;
 
     m_petStable = std::make_unique<PetStable>();
     m_petStable->MaxStabledPets = petStableSlots;
+
+    if (getClass() == CLASS_HUNTER && m_petStable->MaxStabledPets < DEFAULT_HUNTER_STABLE_SLOTS)
+        m_petStable->MaxStabledPets = DEFAULT_HUNTER_STABLE_SLOTS;
 
     if (m_petStable->MaxStabledPets > MAX_PET_STABLES)
     {

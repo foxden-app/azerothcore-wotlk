@@ -21,6 +21,7 @@
 #include "ScriptedCreature.h"
 #include "Spell.h"
 #include "SpellMgr.h"
+#include "WorldSession.h"
 
 /*#####
 # item_only_for_flight
@@ -212,6 +213,56 @@ public:
     }
 };
 
+class item_hunter_stable_whistle : public ItemScript
+{
+public:
+    item_hunter_stable_whistle() : ItemScript("item_hunter_stable_whistle") { }
+
+    bool OnUse(Player* player, Item* item, SpellCastTargets const& /*targets*/) override
+    {
+        if (player->getClass() != CLASS_HUNTER)
+        {
+            player->SendSystemMessage("Only hunters can use the Stable Master's Whistle.");
+            player->SendEquipError(EQUIP_ERR_CANT_DO_RIGHT_NOW, item, nullptr);
+            return true;
+        }
+
+        if (!player->IsAlive())
+        {
+            player->SendSystemMessage("You must be alive to use the Stable Master's Whistle.");
+            player->SendEquipError(EQUIP_ERR_CANT_DO_RIGHT_NOW, item, nullptr);
+            return true;
+        }
+
+        if (player->IsInCombat())
+        {
+            player->SendSystemMessage("You cannot use the Stable Master's Whistle while in combat.");
+            player->SendEquipError(EQUIP_ERR_CANT_DO_RIGHT_NOW, item, nullptr);
+            return true;
+        }
+
+        if (player->InBattleground() || player->InArena())
+        {
+            player->SendSystemMessage("The Stable Master's Whistle is disabled in battlegrounds and arenas.");
+            player->SendEquipError(EQUIP_ERR_CANT_DO_RIGHT_NOW, item, nullptr);
+            return true;
+        }
+
+        WorldSession* session = player->GetSession();
+        if (!session || !session->CheckStableMaster(player->GetGUID()))
+        {
+            player->SendEquipError(EQUIP_ERR_CANT_DO_RIGHT_NOW, item, nullptr);
+            return true;
+        }
+
+        player->Dismount();
+        player->RemoveAurasByType(SPELL_AURA_MOUNTED);
+        player->GetOrInitPetStable();
+        session->SendStablePet(player->GetGUID());
+        return true;
+    }
+};
+
 void AddSC_item_scripts()
 {
     new item_only_for_flight();
@@ -221,4 +272,5 @@ void AddSC_item_scripts()
     new item_petrov_cluster_bombs();
     new item_captured_frog();
     new item_generic_limit_chance_above_60();
+    new item_hunter_stable_whistle();
 }

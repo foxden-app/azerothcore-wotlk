@@ -70,6 +70,17 @@
         "mode": "doc_from_markdown"
       },
       "last_synced_at": "2026-05-23T13:51:20+08:00"
+    },
+    {
+      "key": "hunter-portable-stable-proposal",
+      "title": "猎人便携兽栏创意评审",
+      "source": "ops/tencent-docs/hunter-portable-stable-proposal.md",
+      "sync": {
+        "mode": "doc_from_markdown"
+      },
+      "file_id": "dNhvKcOUqaMR",
+      "url": "https://docs.qq.com/doc/DZE5odktjT1VxYU1S",
+      "last_synced_at": "2026-05-29T09:12:08+08:00"
     }
   ]
 }
