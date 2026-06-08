@@ -234,6 +234,41 @@ class CommonTests(unittest.TestCase):
 
         self.assertFalse(captured["payload"]["store"])
 
+    def test_hermes_client_can_enable_response_store_with_truncation(self):
+        captured = {}
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"id":"resp_test","status":"completed","output":[]}'
+
+        def fake_urlopen(request, timeout):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+
+        client = hermes_relay.HermesClient(
+            "http://127.0.0.1:8642/v1/responses",
+            api_key="",
+            model="hermes-agent",
+            timeout=1,
+            store=True,
+            truncation_auto=True,
+        )
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            client.send_event(conversation="wow-test", event={"id": 1}, action_results=[])
+
+        self.assertTrue(captured["payload"]["store"])
+        self.assertEqual(captured["payload"]["conversation"], "wow-test")
+        self.assertEqual(captured["payload"]["truncation"], "auto")
+
     def test_hermes_client_minimal_payload_omits_context_and_recent_actions(self):
         captured = {}
 
@@ -285,6 +320,40 @@ class CommonTests(unittest.TestCase):
         self.assertTrue(envelope["event"]["context_available"])
         self.assertEqual(envelope["event"]["message"], "我在哪里")
 
+    def test_hermes_client_can_include_short_recent_chat_context(self):
+        captured = {}
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"id":"resp_test","status":"completed","output":[]}'
+
+        def fake_urlopen(request, timeout):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+
+        client = hermes_relay.HermesClient(
+            "http://127.0.0.1:8642/v1/responses",
+            api_key="",
+            model="hermes-agent",
+            timeout=1,
+            store=False,
+        )
+        recent = [{"event_id": 10, "speaker": "Wuya", "message": "坐哪艘船去荆棘谷?"}]
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            client.send_event(conversation="wow-test", event={"id": 11}, action_results=[], recent_chat_context=recent)
+
+        envelope = json.loads(captured["payload"]["input"].split("\n", 1)[1])
+        self.assertEqual(envelope["recent_chat_context"], recent)
+
     def test_hermes_client_full_payload_can_include_recent_actions(self):
         captured = {}
 
@@ -321,6 +390,64 @@ class CommonTests(unittest.TestCase):
         self.assertEqual(envelope["context_mode"], "embedded")
         self.assertIn("context", envelope["event"])
         self.assertEqual(envelope["recent_action_results"], [{"id": 2}])
+
+    def test_recent_chat_context_keeps_same_conversation_and_visible_reply(self):
+        current = {
+            "id": 30,
+            "channel": "whisper",
+            "speaker_guid": 556,
+            "speaker_name": "Wuya",
+            "bot_guid": 202,
+            "bot_name": "瓦小狸",
+            "message": "其他几个去哪里?",
+        }
+        events = [
+            {
+                "id": 28,
+                "channel": "whisper",
+                "speaker_guid": 556,
+                "speaker_name": "Wuya",
+                "bot_guid": 202,
+                "bot_name": "瓦小狸",
+                "message": "坐哪艘船去荆棘谷?",
+            },
+            {
+                "id": 27,
+                "channel": "whisper",
+                "speaker_guid": 556,
+                "speaker_name": "Wuya",
+                "bot_guid": 999,
+                "bot_name": "别的机器人",
+                "message": "这句不该混进来",
+            },
+        ]
+
+        def fake_fetch_action_results(_db, event_id, limit=8):
+            if event_id == 28:
+                return [
+                    {
+                        "status": "done",
+                        "action_type": "reply",
+                        "channel": "whisper",
+                        "bot_name": "瓦小狸",
+                        "text": "最南边码头去藏宝海湾。",
+                    }
+                ]
+            return []
+
+        with (
+            patch("hermes_relay.fetch_events", return_value=events),
+            patch("hermes_relay.fetch_action_results", side_effect=fake_fetch_action_results),
+        ):
+            context = hermes_relay.recent_chat_context_for_event(object(), current, limit=4)
+
+        self.assertEqual(len(context), 1)
+        self.assertEqual(context[0]["message"], "坐哪艘船去荆棘谷?")
+        self.assertEqual(context[0]["visible_reply"]["text"], "最南边码头去藏宝海湾。")
+
+    def test_recent_chat_context_is_disabled_by_default(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(hermes_relay.recent_chat_limit(), 0)
 
     def test_combat_summary_compact_keeps_key_facts(self):
         facts = {
@@ -433,6 +560,14 @@ class CommonTests(unittest.TestCase):
         event = {"channel": "whisper", "speaker_guid": 10, "bot_guid": 20, "group_leader_guid": 99}
         self.assertEqual(hermes_relay.conversation_for(event), "wow-whisper-10-20")
 
+    def test_conversation_for_whisper_isolated_by_player_and_bot(self):
+        first = {"channel": "whisper", "speaker_guid": 10, "bot_guid": 20}
+        other_player = {"channel": "whisper", "speaker_guid": 11, "bot_guid": 20}
+        other_bot = {"channel": "whisper", "speaker_guid": 10, "bot_guid": 21}
+
+        self.assertNotEqual(hermes_relay.conversation_for(first), hermes_relay.conversation_for(other_player))
+        self.assertNotEqual(hermes_relay.conversation_for(first), hermes_relay.conversation_for(other_bot))
+
     def test_conversation_for_solo(self):
         event = {"channel": "say", "speaker_guid": 10, "bot_guid": None, "group_leader_guid": None}
         self.assertEqual(hermes_relay.conversation_for(event), "wow-player-10")
@@ -539,6 +674,9 @@ class CommonTests(unittest.TestCase):
         self.assertEqual(hermes_relay.simple_social_reply_text("小狸，在吗？"), "我在。")
         self.assertEqual(hermes_relay.simple_social_reply_text("在不？"), "我在。")
         self.assertEqual(hermes_relay.simple_social_reply_text("瓦小狸谢谢"), "不客气。")
+        self.assertEqual(hermes_relay.simple_social_reply_text("bye"), "拜拜。")
+        self.assertEqual(hermes_relay.simple_social_reply_text("再见"), "拜拜。")
+        self.assertEqual(hermes_relay.simple_social_reply_text("c"), "c")
         self.assertIsNone(hermes_relay.simple_social_reply_text("晚上好，帮我叫队友上线"))
 
     def test_context_control_request(self):
@@ -555,6 +693,51 @@ class CommonTests(unittest.TestCase):
         self.assertEqual(hermes_relay.intrinsic_command_request("release!"), "release")
         self.assertEqual(hermes_relay.intrinsic_command_request("帮我再组一个法师"), "")
         self.assertEqual(hermes_relay.intrinsic_command_request("summon a mage"), "")
+
+    def test_group_with_bot_request_only_matches_short_invites(self):
+        self.assertTrue(hermes_relay.group_with_bot_request("组我"))
+        self.assertTrue(hermes_relay.group_with_bot_request("瓦小狸，拉我进组"))
+        self.assertTrue(hermes_relay.group_with_bot_request("小狸组一下"))
+        self.assertFalse(hermes_relay.group_with_bot_request("帮我组个法师"))
+        self.assertFalse(hermes_relay.group_with_bot_request("队友上线"))
+
+    def test_group_with_bot_fast_path_invites_current_bot(self):
+        class FakeDb:
+            def scalar_int(self, _sql):
+                return 0
+
+        event = {
+            "id": 91,
+            "channel": "whisper",
+            "speaker_guid": 556,
+            "speaker_account": 1,
+            "speaker_name": "Wuya",
+            "bot_guid": 20,
+            "bot_name": "瓦小狸",
+            "group_leader_guid": 556,
+            "message": "组我",
+            "context": {"target_bot_context": {"name": "瓦小狸", "bot_kind": "anchor_world"}},
+        }
+        calls = []
+
+        def fake_enqueue_action(_db, **kwargs):
+            calls.append(kwargs)
+            return {"action_id": 42, "deduped": False}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            relay = hermes_relay.Relay(FakeDb(), client=object(), state_path=pathlib.Path(tmp) / "state.json")
+            with (
+                patch("hermes_relay.enqueue_action", side_effect=fake_enqueue_action),
+                patch.object(relay, "wait_for_action_result", return_value={"status": "done"}),
+                patch.object(relay, "enqueue_visible_reply") as reply,
+                patch("hermes_relay.log_event"),
+            ):
+                self.assertTrue(relay.try_handle_group_with_bot_request(event))
+
+        self.assertEqual(calls[0]["action_type"], "invite_player")
+        self.assertEqual(calls[0]["payload"]["target_player"], "瓦小狸")
+        self.assertTrue(calls[0]["payload"]["fast_path"])
+        reply.assert_called_once()
 
     def test_intrinsic_command_does_not_call_hermes_or_enqueue_actions(self):
         class FakeDb:
@@ -717,6 +900,107 @@ class CommonTests(unittest.TestCase):
         self.assertEqual(profile["active_strategies"], ["holy heal", "buff", "cure"])
         self.assertIn("shadow", profile["supported_roles"])
 
+    def test_party_state_summary_is_progressive_and_omits_deep_bot_context(self):
+        event = {
+            "id": 301,
+            "channel": "party",
+            "speaker_guid": 556,
+            "speaker_name": "Wuya",
+            "message": "看看队伍",
+            "context": {
+                "environment": {
+                    "location": {
+                        "map_name": "Eastern Kingdoms",
+                        "zone_name": "提瑞斯法林地",
+                        "area_name": "幽暗城门口",
+                        "x": 1831.2,
+                        "y": 241.8,
+                    },
+                    "nearby_hostiles": [{"name": "血色战士"}],
+                },
+                "speaker": {
+                    "guid": 556,
+                    "name": "Wuya",
+                    "class": 11,
+                    "level": 30,
+                    "role": "player",
+                    "health_pct": 82.4,
+                    "mana_pct": 61,
+                    "alive": True,
+                    "combat": False,
+                    "location": {"zone_name": "提瑞斯法林地", "area_name": "幽暗城门口"},
+                },
+                "group_members": [
+                    {
+                        "guid": 556,
+                        "name": "Wuya",
+                        "class": 11,
+                        "level": 30,
+                        "role": "player",
+                        "health_pct": 82.4,
+                        "mana_pct": 61,
+                        "alive": True,
+                        "combat": False,
+                    },
+                    {
+                        "guid": 202,
+                        "name": "瓦小狸",
+                        "is_bot": True,
+                        "bot_kind": "group",
+                        "class": 5,
+                        "level": 30,
+                        "role": "healer",
+                        "spec_name": "holy",
+                        "active_strategy_text": "Strategies: holy heal, buff, cure, follow, loot",
+                        "active_strategies": ["holy heal", "buff", "cure", "follow", "loot"],
+                        "health_pct": 100,
+                        "mana_pct": 94,
+                        "alive": True,
+                        "combat": False,
+                        "selected_target": {"name": "血色战士"},
+                    },
+                ],
+                "bots": [
+                    {
+                        "guid": 202,
+                        "name": "瓦小狸",
+                        "bot_kind": "group",
+                        "class": 5,
+                        "active_strategy_text": "Strategies: holy heal, buff, cure",
+                    },
+                    {
+                        "guid": 303,
+                        "name": "令狐冲",
+                        "bot_kind": "owned",
+                        "class": 1,
+                        "level": 30,
+                        "role": "tank",
+                        "health_pct": 77,
+                        "mana_pct": 0,
+                    },
+                ],
+            },
+        }
+
+        summary = server.party_state_summary(event)
+
+        self.assertEqual(summary["summary"]["member_count"], 2)
+        self.assertEqual(summary["summary"]["bot_count"], 1)
+        self.assertEqual(summary["members"][1]["name"], "瓦小狸")
+        self.assertEqual(summary["members"][1]["class"]["zh"], "牧师")
+        self.assertEqual(summary["members"][1]["health_pct"], 100)
+        self.assertEqual(summary["members"][1]["mana_pct"], 94)
+        self.assertEqual(summary["available_bots_not_in_party"][0]["name"], "令狐冲")
+        self.assertEqual(summary["location"], {"map_name": "Eastern Kingdoms", "zone_name": "提瑞斯法林地", "area_name": "幽暗城门口"})
+
+        members_json = json.dumps(summary["members"], ensure_ascii=False)
+        self.assertNotIn("active_strategy_text", members_json)
+        self.assertNotIn("active_strategies", members_json)
+        self.assertNotIn("selected_target", members_json)
+        self.assertNotIn("nearby_hostiles", json.dumps(summary["members"], ensure_ascii=False))
+        self.assertNotIn("nearby_hostiles", json.dumps(summary.get("location", {}), ensure_ascii=False))
+        self.assertIn("wow_get_bot_profile", summary["next_suggestion"])
+
     def test_bot_profile_enriches_talent_groups_from_character_db(self):
         bot = {
             "guid": 541,
@@ -781,6 +1065,37 @@ class CommonTests(unittest.TestCase):
         self.assertTrue(server.command_requires_admin_audit("initself=epic"))
         self.assertFalse(server.command_requires_admin_audit("remove 黑化观音"))
 
+    def test_gm_command_help_expands_level_recipe(self):
+        class FakeWorldDb:
+            def query_rows(self, sql):
+                self.sql = sql
+                return [
+                    [
+                        "levelup",
+                        "2",
+                        "Syntax: .levelup [$playername] [#numberoflevels]",
+                    ]
+                ]
+
+        world = FakeWorldDb()
+        recipes = server.matching_gm_command_recipes("我升级过头了，怎么降级")
+        commands = server.search_gm_command_help(world, "我升级过头了，怎么降级", gm_level=3)
+
+        self.assertEqual(recipes[0]["key"], "change_level")
+        self.assertIn("levelup", server.gm_command_search_terms("我升级过头了，怎么降级"))
+        self.assertIn("`security` <= 3", world.sql)
+        self.assertIn("`name` = 'levelup'", world.sql)
+        self.assertEqual(commands[0]["command"], ".levelup")
+        self.assertTrue(commands[0]["can_use"])
+
+    def test_gm_command_help_expands_spell_lookup_recipe(self):
+        recipes = server.matching_gm_command_recipes("怎么给你学双天赋技能")
+        terms = server.gm_command_search_terms("怎么给你学双天赋技能")
+
+        self.assertEqual(recipes[0]["key"], "lookup_and_learn_spell")
+        self.assertIn("lookup spell", terms)
+        self.assertIn("learn", terms)
+
     def test_autonomy_commands_are_typed_command_candidates(self):
         for command in ["grind", "equip upgrade", "s gray", "s vendor", "repair", "b vendor", "mail ?", "mail take *"]:
             self.assertIn(command, server.BOT_COMMANDS)
@@ -835,6 +1150,67 @@ class CommonTests(unittest.TestCase):
             "Deadbot": "dead",
             "Othermap": "different_map",
         })
+
+    def test_location_auto_uses_target_bot_for_you_pronoun(self):
+        event = {
+            "id": 1397,
+            "speaker_guid": 556,
+            "speaker_name": "Wuya",
+            "target_name": "瓦小狸",
+            "message": "你在哪呢?",
+            "context": {
+                "speaker": {
+                    "guid": 556,
+                    "name": "Wuya",
+                    "location": {"zone_name": "Arathi Highlands", "area_name": "Refuge Pointe"},
+                },
+                "environment": {
+                    "location": {"zone_name": "Arathi Highlands", "area_name": "Refuge Pointe"},
+                },
+                "target_bot_context": {
+                    "guid": 202,
+                    "name": "瓦小狸",
+                    "is_bot": True,
+                    "bot_kind": "anchor_world",
+                    "location": {"zone_name": "Stormwind City", "area_name": "Stormwind City"},
+                },
+            },
+        }
+
+        payload = server.location_payload_fields(event)
+
+        self.assertEqual(payload["resolved_subject"], "bot")
+        self.assertEqual(payload["location"]["area_name"], "Stormwind City")
+        self.assertEqual(payload["speaker"]["location"]["area_name"], "Refuge Pointe")
+
+    def test_location_auto_uses_speaker_for_me_pronoun(self):
+        event = {
+            "id": 1398,
+            "speaker_guid": 556,
+            "speaker_name": "Wuya",
+            "target_name": "瓦小狸",
+            "message": "我在哪?",
+            "context": {
+                "speaker": {
+                    "guid": 556,
+                    "name": "Wuya",
+                    "location": {"zone_name": "Arathi Highlands", "area_name": "Refuge Pointe"},
+                },
+                "target_bot_context": {
+                    "guid": 202,
+                    "name": "瓦小狸",
+                    "is_bot": True,
+                    "bot_kind": "anchor_world",
+                    "location": {"zone_name": "Stormwind City", "area_name": "Stormwind City"},
+                },
+            },
+        }
+
+        payload = server.location_payload_fields(event)
+
+        self.assertEqual(payload["resolved_subject"], "speaker")
+        self.assertEqual(payload["location"]["area_name"], "Refuge Pointe")
+        self.assertEqual(payload["target_bot"]["location"]["area_name"], "Stormwind City")
 
     def test_quest_guide_entry_builds_next_step(self):
         quest = {

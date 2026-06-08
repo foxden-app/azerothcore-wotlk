@@ -58,6 +58,9 @@ CONTROLLED_BOT_KINDS = {"owned", "group"}
 REPLY_BOT_KINDS = CONTROLLED_BOT_KINDS | {"random_world", "anchor_world"}
 REPLY_CHANNELS = {"party", "raid", "say", "whisper"}
 ANCHOR_BOT_DEFAULT_NAME = "瓦小狸"
+LOCATION_SUBJECTS = {"auto", "speaker", "player", "requester", "bot", "reply_bot", "target_bot", "self", "both"}
+BOT_LOCATION_SUBJECTS = {"bot", "reply_bot", "target_bot", "self"}
+SPEAKER_LOCATION_SUBJECTS = {"speaker", "player", "requester"}
 PLAYERBOT_COMMAND_MAX_LEN = 512
 GROUP_SELECTORS = {"group", "party", "all", "*", "队伍", "全体", "所有", "所有人", "大家", "机器人"}
 HEALER_SELECTORS = {"healer", "healers", "heal", "治疗", "奶", "奶妈", "治疗们"}
@@ -812,6 +815,64 @@ PLAYERBOT_COMMAND_CATALOG: list[dict[str, str]] = [
     },
 ]
 
+GM_COMMAND_RECIPES: list[dict[str, Any]] = [
+    {
+        "key": "change_level",
+        "aliases": ["升级", "降级", "等级", "level", "levelup"],
+        "summary": "按差值调整角色等级。",
+        "required_gm_level": 2,
+        "commands": ["levelup"],
+        "steps": [
+            "先确认当前等级和目标等级，计算差值 delta = 目标等级 - 当前等级。",
+            "选中角色后执行 `.levelup <delta>`，或执行 `.levelup <Playername> <delta>`。",
+        ],
+        "notes": [
+            "不存在 `.modify level` 命令。",
+            "降级可能重置天赋，并可能导致不再满足等级要求的已装备物品丢失。",
+        ],
+    },
+    {
+        "key": "lookup_and_learn_spell",
+        "aliases": ["技能", "法术", "学技能", "学习技能", "双天赋", "spell", "learn", "dual talent", "dual spec"],
+        "summary": "先查法术 ID，再让选中角色学习法术。",
+        "required_gm_level": 2,
+        "commands": ["lookup spell", "learn"],
+        "steps": [
+            "执行 `.lookup spell <英文关键字>` 查询法术 ID。",
+            "核对查询结果后，选中角色并执行 `.learn <spell_id>`。",
+        ],
+        "notes": [
+            "不要凭记忆猜法术 ID。",
+            "能否生效仍取决于服务端版本、角色等级和服务端规则。",
+        ],
+    },
+    {
+        "key": "reset_talents",
+        "aliases": ["洗天赋", "重置天赋", "清空天赋", "reset talent", "reset talents"],
+        "summary": "重置角色或宠物天赋。",
+        "required_gm_level": 3,
+        "commands": ["reset talents"],
+        "steps": [
+            "选中角色或宠物后执行 `.reset talents`。",
+            "也可以执行 `.reset talents <Playername>` 重置指定角色。",
+        ],
+        "notes": [],
+    },
+    {
+        "key": "set_free_talent_points",
+        "aliases": ["天赋点", "自由天赋点", "talentpoints", "talent points"],
+        "summary": "临时设置选中角色或宠物的可用天赋点。",
+        "required_gm_level": 2,
+        "commands": ["modify talentpoints"],
+        "steps": [
+            "选中角色或宠物后执行 `.modify talentpoints <amount>`。",
+        ],
+        "notes": [
+            "这是临时值；下次升级、登录或任务奖励时会恢复为服务端默认值。",
+        ],
+    },
+]
+
 
 def db() -> MysqlCli:
     return MysqlCli.from_env()
@@ -1435,6 +1496,195 @@ def bot_profile_from_character(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def bool_value(value: Any, default: bool | None = None) -> bool | None:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def percent_value(value: Any) -> int | float | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number):
+        return None
+    rounded = round(number, 1)
+    return int(rounded) if rounded.is_integer() else rounded
+
+
+def short_location_from_actor(actor: dict[str, Any]) -> dict[str, Any]:
+    location = actor.get("location") if isinstance(actor.get("location"), dict) else {}
+    result: dict[str, Any] = {}
+    for key in ("map_name", "zone_name", "area_name"):
+        value = location.get(key) if location else actor.get(key)
+        if value not in (None, ""):
+            result[key] = value
+    if result:
+        return result
+    for key in ("map_id", "zone_id", "area_id"):
+        value = location.get(key) if location else actor.get(key)
+        if value not in (None, ""):
+            result[key] = value
+    return result
+
+
+def party_member_summary(member: dict[str, Any]) -> dict[str, Any]:
+    class_id = int_value(member.get("class"))
+    result: dict[str, Any] = {}
+    for key in ("guid", "name", "level"):
+        value = member.get(key)
+        if value not in (None, ""):
+            result[key] = value
+    if class_id:
+        result["class"] = class_display(class_id)
+
+    online = bool_value(member.get("online"), True)
+    if online is not None:
+        result["online"] = online
+    is_bot = bool_value(member.get("is_bot"), None)
+    bot_kind = str(member.get("bot_kind") or "").strip()
+    if is_bot is not None:
+        result["is_bot"] = is_bot
+    elif bot_kind:
+        result["is_bot"] = True
+    if bot_kind:
+        result["bot_kind"] = bot_kind
+
+    role = str(member.get("role") or "").strip().lower()
+    if role:
+        result["role"] = role
+    health_pct = percent_value(member.get("health_pct"))
+    mana_pct = percent_value(member.get("mana_pct"))
+    if health_pct is not None:
+        result["health_pct"] = health_pct
+    if mana_pct is not None:
+        result["mana_pct"] = mana_pct
+
+    for key in ("alive", "combat"):
+        value = bool_value(member.get(key), None)
+        if value is not None:
+            result[key] = value
+
+    distance = percent_value(member.get("distance_to_speaker", member.get("distance")))
+    if distance is not None:
+        result["distance_to_speaker"] = distance
+
+    location = short_location_from_actor(member)
+    if location:
+        result["location"] = location
+    return result
+
+
+def party_state_summary(event: dict[str, Any]) -> dict[str, Any]:
+    context = event.get("context") if isinstance(event.get("context"), dict) else {}
+    speaker_context = context.get("speaker") if isinstance(context.get("speaker"), dict) else {}
+    environment = context.get("environment") if isinstance(context.get("environment"), dict) else {}
+    raw_members = context.get("group_members") if isinstance(context.get("group_members"), list) else []
+    if not raw_members and speaker_context:
+        raw_members = [speaker_context]
+
+    members: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for item in raw_members:
+        if not isinstance(item, dict):
+            continue
+        summary = party_member_summary(item)
+        name_key = str(summary.get("name") or "").strip().lower()
+        guid_key = str(summary.get("guid") or "").strip()
+        dedupe_key = name_key or guid_key
+        if dedupe_key and dedupe_key in seen_names:
+            continue
+        if dedupe_key:
+            seen_names.add(dedupe_key)
+        if summary:
+            members.append(summary)
+
+    extra_bots: list[dict[str, Any]] = []
+    for item in context.get("bots") if isinstance(context.get("bots"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        name_key = str(item.get("name") or "").strip().lower()
+        guid_key = str(item.get("guid") or "").strip()
+        dedupe_key = name_key or guid_key
+        if dedupe_key and dedupe_key in seen_names:
+            continue
+        if dedupe_key:
+            seen_names.add(dedupe_key)
+        summary = party_member_summary(item)
+        if summary:
+            extra_bots.append(summary)
+
+    target_bot = context.get("target_bot_context") if isinstance(context.get("target_bot_context"), dict) else {}
+    target_summary = party_member_summary(target_bot) if target_bot else {}
+    if target_summary:
+        name_key = str(target_summary.get("name") or "").strip().lower()
+        guid_key = str(target_summary.get("guid") or "").strip()
+        if (name_key or guid_key) in seen_names:
+            target_summary = {}
+
+    speaker_summary = party_member_summary(speaker_context) if speaker_context else {
+        "guid": event.get("speaker_guid"),
+        "name": event.get("speaker_name"),
+    }
+    location = short_location_from_actor({"location": environment.get("location")}) if environment else {}
+    if not location and speaker_context:
+        location = short_location_from_actor(speaker_context)
+
+    online_count = sum(1 for member in members if member.get("online", True))
+    bot_count = sum(1 for member in members if member.get("is_bot") or member.get("bot_kind"))
+    player_count = max(0, len(members) - bot_count)
+    combat_count = sum(1 for member in members if member.get("combat"))
+    dead_count = sum(1 for member in members if member.get("alive") is False)
+
+    result: dict[str, Any] = {
+        "event_id": event.get("id"),
+        "channel": event.get("channel"),
+        "speaker": speaker_summary,
+        "message": event.get("message"),
+        "summary": {
+            "member_count": len(members),
+            "online_count": online_count,
+            "player_count": player_count,
+            "bot_count": bot_count,
+            "combat_count": combat_count,
+            "dead_count": dead_count,
+        },
+        "members": members,
+        "compacted": True,
+        "omitted_by_default": [
+            "active_strategy_text",
+            "active_strategies",
+            "spec_name",
+            "selected_target",
+            "combat_target",
+            "nearby_hostiles",
+            "coordinates",
+        ],
+        "next_suggestion": "只在玩家明确问某个 bot 的天赋/策略/职责细节时，再调用 wow_get_bot_profile(event_id=当前事件, bot_name=名字)。不要批量查询所有 bot 画像。",
+    }
+    if location:
+        result["location"] = location
+    if extra_bots:
+        result["available_bots_not_in_party"] = extra_bots[:8]
+        if len(extra_bots) > 8:
+            result["available_bots_omitted"] = len(extra_bots) - 8
+    if target_summary:
+        result["target_bot"] = target_summary
+    return result
+
+
 def supported_role_names(class_id: int) -> list[str]:
     plans = ROLE_PLANS.get(int(class_id or 0), {})
     return sorted(name for name, plan in plans.items() if not plan.get("alias"))
@@ -1785,6 +2035,80 @@ def payload_result(event: str, **fields: Any) -> dict[str, Any]:
     return result
 
 
+def matching_gm_command_recipes(query: str) -> list[dict[str, Any]]:
+    needle = str(query or "").strip().lower()
+    if not needle:
+        return []
+    return [
+        recipe
+        for recipe in GM_COMMAND_RECIPES
+        if any(alias.lower() in needle for alias in recipe["aliases"])
+    ]
+
+
+def gm_command_search_terms(query: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def append(value: str) -> None:
+        term = str(value or "").strip().lower().lstrip(".")
+        if term and term not in seen:
+            seen.add(term)
+            terms.append(term)
+
+    append(query)
+    for recipe in matching_gm_command_recipes(query):
+        for command in recipe["commands"]:
+            append(command)
+    return terms
+
+
+def search_gm_command_help(world: MysqlCli, query: str, *, gm_level: int, limit: int = 12) -> list[dict[str, Any]]:
+    terms = gm_command_search_terms(query)
+    if not terms:
+        return []
+    bounded_limit = max(1, min(int(limit), 30))
+    recipes = matching_gm_command_recipes(query)
+    if recipes:
+        recipe_commands = {
+            str(command).strip().lower()
+            for recipe in recipes
+            for command in recipe["commands"]
+        }
+        clauses = [f"`name` = {sql_quote(command)}" for command in sorted(recipe_commands)]
+    else:
+        clauses = [
+            f"(`name` LIKE {sql_like(term)} OR `help` LIKE {sql_like(term)})"
+            for term in terms
+        ]
+    rows = world.query_rows(
+        "SELECT `name`, `security`, REPLACE(REPLACE(REPLACE(`help`, '\\r', ' '), '\\n', ' '), '\\t', ' ') "
+        "FROM `command` "
+        f"WHERE `security` <= {max(0, int(gm_level))} AND ({' OR '.join(clauses)}) "
+        "ORDER BY `security`, `name` "
+        f"LIMIT {bounded_limit}"
+    )
+    commands: list[dict[str, Any]] = []
+    for row in rows:
+        if len(row) < 3:
+            continue
+        name = str(row[0] or "").strip()
+        if not name:
+            continue
+        required_gm_level = int(row[1] or 0)
+        help_text = str(row[2] or "").strip()
+        commands.append(
+            {
+                "command": f".{name}",
+                "name": name,
+                "required_gm_level": required_gm_level,
+                "can_use": int(gm_level) >= required_gm_level,
+                "help": help_text[:1600],
+            }
+        )
+    return commands
+
+
 def recent_events_limit(limit: int, *, anchored: bool) -> int:
     maximum = 10 if anchored else 3
     return max(1, min(int(limit), maximum))
@@ -2032,6 +2356,119 @@ def event_location(event: dict[str, Any]) -> dict[str, Any]:
         if result.get(key) is None and speaker.get(key) is not None:
             result[key] = speaker.get(key)
     return result
+
+
+def actor_location(actor: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(actor, dict):
+        return {}
+    source = actor.get("location") if isinstance(actor.get("location"), dict) else {}
+    result = dict(source)
+    for key in ("map_id", "zone_id", "area_id", "map_name", "zone_name", "area_name", "x", "y", "z", "orientation"):
+        value = actor.get(key)
+        if result.get(key) is None and value is not None:
+            result[key] = value
+    return {key: value for key, value in result.items() if value not in (None, "")}
+
+
+def event_speaker_actor(event: dict[str, Any]) -> dict[str, Any]:
+    context = event.get("context") if isinstance(event.get("context"), dict) else {}
+    speaker = context.get("speaker") if isinstance(context.get("speaker"), dict) else {}
+    result = dict(speaker)
+    result.setdefault("guid", event.get("speaker_guid"))
+    result.setdefault("name", event.get("speaker_name"))
+    result.setdefault("is_bot", False)
+    location = event_location(event)
+    if location:
+        result["location"] = location
+    return result
+
+
+def location_actor_summary(actor: dict[str, Any], subject: str) -> dict[str, Any]:
+    if not actor:
+        return {}
+    summary = {
+        "subject": subject,
+        "guid": int(actor.get("guid") or 0),
+        "name": str(actor.get("name") or ""),
+        "is_bot": bool(actor.get("is_bot")),
+        "bot_kind": str(actor.get("bot_kind") or ""),
+        "role": str(actor.get("role") or ""),
+        "location": actor_location(actor),
+    }
+    return {key: value for key, value in summary.items() if value not in ("", None, {})}
+
+
+def normalize_location_subject(subject: str) -> str:
+    normalized = str(subject or "auto").strip().lower().replace("-", "_")
+    return normalized if normalized in LOCATION_SUBJECTS else "auto"
+
+
+def infer_location_subject(event: dict[str, Any], bot_name: str = "") -> tuple[str, str]:
+    message = str(event.get("message") or "").strip().lower()
+    compact = "".join(message.split())
+    aliases = [anchor_bot_name(), *anchor_bot_aliases(), str(event.get("bot_name") or ""), str(event.get("target_name") or ""), bot_name]
+    alias_hit = any(alias and alias.lower() in compact for alias in aliases)
+    bot_pronoun = alias_hit or "你" in compact or "自己" in compact or "yourself" in compact or "you" in compact
+    speaker_pronoun = any(token in compact for token in ("我", "俺", "这里", "这儿", "我这", "my", "me", "here"))
+    if bot_pronoun and not speaker_pronoun:
+        return "bot", "auto_message_bot_pronoun"
+    if speaker_pronoun and not bot_pronoun:
+        return "speaker", "auto_message_speaker_pronoun"
+    if bot_pronoun and speaker_pronoun:
+        return "both", "auto_message_mixed_pronouns"
+    if find_context_bot(event, bot_name):
+        return "both", "auto_ambiguous_with_bot_context"
+    return "speaker", "auto_fallback_speaker"
+
+
+def location_payload_fields(event: dict[str, Any], subject: str = "auto", bot_name: str = "") -> dict[str, Any]:
+    requested_subject = normalize_location_subject(subject)
+    if requested_subject == "auto":
+        resolved_subject, resolve_reason = infer_location_subject(event, bot_name)
+    elif requested_subject in BOT_LOCATION_SUBJECTS:
+        resolved_subject, resolve_reason = "bot", "explicit_subject"
+    elif requested_subject in SPEAKER_LOCATION_SUBJECTS:
+        resolved_subject, resolve_reason = "speaker", "explicit_subject"
+    else:
+        resolved_subject, resolve_reason = "both", "explicit_subject"
+
+    speaker = event_speaker_actor(event)
+    bot = find_context_bot(event, bot_name) or {}
+    speaker_summary = location_actor_summary(speaker, "speaker")
+    bot_summary = location_actor_summary(bot, "bot")
+
+    if resolved_subject == "bot":
+        actor = bot_summary
+        location = bot_summary.get("location", {}) if bot_summary else {}
+    elif resolved_subject == "speaker":
+        actor = speaker_summary
+        location = speaker_summary.get("location", {}) if speaker_summary else {}
+    else:
+        actor = {}
+        location = {}
+
+    feedback_phase = "ready" if location or resolved_subject == "both" else "missing_location"
+    next_suggestion = "按 resolved_subject 使用 location；如果玩家问“你/自己”，应答当前 bot 的位置。"
+    if resolved_subject == "both":
+        next_suggestion = "玩家消息同时涉及双方位置；回复时分别使用 speaker.location 和 target_bot.location。"
+    elif resolved_subject == "bot" and not bot_summary:
+        next_suggestion = "当前事件没有目标 bot 上下文；请用 wow_get_party_state 或让玩家点名机器人。"
+
+    return {
+        "event_id": event["id"],
+        "requested_subject": requested_subject,
+        "resolved_subject": resolved_subject,
+        "resolve_reason": resolve_reason,
+        "requested_bot": str(bot_name or "").strip(),
+        "actor": actor,
+        "location": location,
+        "speaker": speaker_summary,
+        "target_bot": bot_summary,
+        "feedback": {
+            "phase": feedback_phase,
+            "next_suggestion": next_suggestion,
+        },
+    }
 
 
 def route_distance(origin: dict[str, Any], destination: dict[str, Any]) -> float | None:
@@ -2309,33 +2746,21 @@ def build_mcp() -> FastMCP:
 
     @mcp.tool()
     def wow_get_party_state(event_id: int = 0, speaker_guid: int = 0) -> dict[str, Any]:
-        """读取某个事件或玩家最近事件里的队伍、机器人和世界上下文。"""
+        """读取队伍摘要；默认只返回成员名、职业、血蓝、在线/战斗状态。天赋/策略请对单个 bot 调 wow_get_bot_profile。"""
         conn = db()
         event = get_event_or_latest(conn, event_id=int(event_id), speaker_guid=int(speaker_guid))
         if not event:
             return {"ok": False, "error": "event_not_found"}
-        context = event.get("context") if isinstance(event.get("context"), dict) else {}
-        return payload_result(
-            "tool_party_state",
-            event_id=event["id"],
-            channel=event["channel"],
-            speaker={"guid": event["speaker_guid"], "name": event["speaker_name"]},
-            message=event["message"],
-            context=context,
-        )
+        return payload_result("tool_party_state", **party_state_summary(event))
 
     @mcp.tool()
-    def wow_get_location(event_id: int = 0, speaker_guid: int = 0) -> dict[str, Any]:
-        """读取服务端已知的位置名称，包括 map_name、zone_name 和 area_name。"""
+    def wow_get_location(event_id: int = 0, speaker_guid: int = 0, subject: str = "auto", bot_name: str = "") -> dict[str, Any]:
+        """读取服务端已知的位置名称。subject 可传 speaker/player 或 bot/self；auto 会按玩家消息里的“我/你/自己”推断。"""
         conn = db()
         event = get_event_or_latest(conn, event_id=int(event_id), speaker_guid=int(speaker_guid))
         if not event:
             return {"ok": False, "error": "event_not_found"}
-        context = event.get("context") if isinstance(event.get("context"), dict) else {}
-        environment = context.get("environment") if isinstance(context.get("environment"), dict) else {}
-        speaker = context.get("speaker") if isinstance(context.get("speaker"), dict) else {}
-        location = environment.get("location") or speaker.get("location") or {}
-        return payload_result("tool_location", event_id=event["id"], location=location)
+        return payload_result("tool_location", **location_payload_fields(event, subject=subject, bot_name=bot_name))
 
     @mcp.tool()
     def wow_resolve_place(query: str, event_id: int = 0, locale: str = "zhCN", limit: int = 8) -> dict[str, Any]:
@@ -2794,6 +3219,46 @@ def build_mcp() -> FastMCP:
             commands=commands[:bounded_limit],
             generic_tool="wow_run_playerbot_command",
             command_line_rule="优先只传 `.playerbots bot` 后面的参数，不要包含 `.playerbots bot` 前缀。",
+        )
+
+    @mcp.tool()
+    def wow_search_gm_command_help(event_id: int, query: str, limit: int = 12) -> dict[str, Any]:
+        """只读检索 AzerothCore GM 命令帮助和常用组合步骤，不执行 GM 命令。"""
+        conn = db()
+        event = fetch_event(conn, int(event_id))
+        if not event:
+            return {"ok": False, "error": "event_not_found"}
+        needle = str(query or "").strip()
+        if not needle:
+            return {"ok": False, "error": "empty_query"}
+        gm_level = account_gm_level(event_speaker_account(event))
+        recipes = []
+        for recipe in matching_gm_command_recipes(needle):
+            item = {key: value for key, value in recipe.items() if key != "aliases"}
+            item["can_use"] = gm_level >= int(recipe["required_gm_level"])
+            recipes.append(item)
+        try:
+            commands = search_gm_command_help(world_db(), needle, gm_level=gm_level, limit=limit)
+        except RuntimeError as exc:
+            log_event(
+                "tool_gm_command_help_failed",
+                source_event_id=int(event_id),
+                speaker=event_speaker_name(event),
+                query=needle,
+                error=str(exc),
+            )
+            return {"ok": False, "error": "gm_command_catalog_unavailable"}
+        return payload_result(
+            "tool_gm_command_help",
+            source_event_id=int(event_id),
+            speaker=event_speaker_name(event),
+            speaker_gm_level=gm_level,
+            query=needle,
+            count=len(commands),
+            commands=commands,
+            recipes=recipes,
+            read_only=True,
+            execution_note="这里只提供帮助，不执行任意 GM 命令。需要自动执行时，必须为具体场景新增带权限校验和审计的 typed MCP 工具。",
         )
 
     @mcp.tool()

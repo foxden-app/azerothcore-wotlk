@@ -1,14 +1,21 @@
 custom_providers:
-  - name: deepseek-wow
-    base_url: https://api.deepseek.com/v1
-    key_env: DEEPSEEK_API_KEY
+  - name: siliconflow-wow
+    base_url: https://api.siliconflow.cn/v1
+    key_env: SILICONFLOW_API_KEY
     api_mode: chat_completions
 
 model:
-  provider: custom:deepseek-wow
-  default: deepseek-v4-flash
+  provider: custom:siliconflow-wow
+  default: nex-agi/Nex-N2-Pro
   api_mode: chat_completions
   max_tokens: 2048
+
+# This Hermes instance is dedicated to the WoW relay. Keep the API server
+# platform on the WoW MCP toolset only; the generic browser/file/terminal
+# toolsets add a large fixed prompt cost to every game event.
+platform_toolsets:
+  api_server:
+    - wow_playerbot
 
 mcp_servers:
   wow_playerbot:

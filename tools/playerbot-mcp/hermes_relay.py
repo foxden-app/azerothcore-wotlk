@@ -30,6 +30,10 @@ from wow_common import (
 DEFAULT_HERMES_URL = "http://192.168.1.179:8642/v1/responses"
 REPLY_CHANNELS = {"party", "raid", "say", "whisper"}
 LISTEN_SCOPES = {"whisper", "direct", "group", "all"}
+RECENT_CHAT_DEFAULT_LIMIT = 0
+RECENT_CHAT_MAX_LIMIT = 8
+RECENT_CHAT_FETCH_MULTIPLIER = 4
+RECENT_CHAT_TEXT_LIMIT = 260
 MINIMAL_EVENT_KEYS = (
     "id",
     "created_at",
@@ -90,6 +94,18 @@ TEAM_ONLINE_RE = re.compile(
     r"(?:队友|队伍|小队|队里|组里|他们|大家|灰名|离线).{0,12}(?:上线|上来|回来|叫回|叫回来|拉回|拉回来|归队)"
     r"|(?:上线|上来|回来|叫回|叫回来|拉回|拉回来|归队).{0,12}(?:队友|队伍|小队|队里|组里|他们|大家|灰名|离线)"
 )
+GROUP_WITH_BOT_MESSAGES = {
+    "组我",
+    "组一下",
+    "组队",
+    "进组",
+    "加我",
+    "邀请我",
+    "拉我",
+    "拉我进组",
+    "拉我组队",
+    "来组",
+}
 CONTEXT_RESET_PHRASES = (
     "新建会话",
     "新开会话",
@@ -128,6 +144,8 @@ GREETING_MESSAGES = {
 }
 PING_MESSAGES = {"在吗", "你在吗", "在不", "在不在", "在么", "你在么"}
 THANKS_MESSAGES = {"谢谢", "谢了", "多谢", "辛苦了", "感谢"}
+BYE_MESSAGES = {"bye", "byebye", "拜拜", "再见", "88", "888", "下了", "晚安"}
+ECHO_MESSAGES = {"c"}
 INTRINSIC_COMMANDS = {
     "follow": "follow",
     "summon": "summon",
@@ -144,10 +162,13 @@ INSTRUCTIONS = """你是 WoW PlayerBot 队伍级 Agent。
 - 每一轮只处理输入里 current_event_id 指定的这一个事件。所有会回复或执行动作的 MCP 调用都必须传 current_event_id；不要沿用记忆、工具历史或旧诊断里的 event_id。
 - 如果工具返回 stale_event_id，说明你用了旧事件；立刻改用 current_event_id 重试一次，仍失败就用 current_event_id 回复玩家失败原因。
 - 需要战斗、位置、队伍、任务、背包、游戏环境或最近动作结果时，按需调用 wow_playerbot MCP 工具查询；不要假设这些上下文每轮都会随事件一起提供。
+- 代词按玩家视角解析：玩家说“我/我这里/这里”是发言玩家，玩家说“你/你自己/瓦小狸”是当前应答 bot。查位置时用 wow_get_location(current_event_id, subject="speaker" 或 subject="bot")；不要把 speaker 位置当作 bot 位置。
+- 如果输入含 recent_chat_context，它只是 relay 显式开启的短期故障兜底，只能用于理解“其他几个/刚才/这里/继续”等省略和代词，不是实时世界事实。正常情况下由 Hermes 当前 conversation/session 管理聊天上下文。
 - 日常聊天和记忆由 Hermes 当前 conversation/session 管理；relay 不会每轮嵌入游戏环境。玩家说“新建会话/重置上下文”只表示切换短期 conversation epoch，不表示删除长期记忆。
 - 不要用 wow_get_recent_events 重建聊天记忆或补齐旧上下文；玩家明确要求查看最近游戏消息/日志时才调用它，并传 current_event_id 让工具按当前玩家或队伍压缩返回。
 - 玩家问“刚才成了吗/怎么没反应/最近做了什么动作”时，优先调用 wow_get_last_command_diagnostic(current_event_id)，不要扫旧 event_id。
 - 不要凭 map_id/zone_id/area_id 猜地点；必须使用工具或事件中的 map_name/zone_name/area_name。
+- wow_get_party_state 默认是轻量队伍摘要，只用于先看成员名、职业、血蓝、在线/战斗状态；不要把它当全量画像。只有玩家明确问某个 bot 的天赋、策略或职责细节时，再对这个 bot 单独调用 wow_get_bot_profile。
 - 战斗中的高频技能、治疗、坦克和 DPS 循环交给 playerbots 本能，不要规划逐技能释放。
 - party/raid/say 事件按队伍级上下文处理；whisper 事件只在私聊上下文回答，不要泄露到 party。
 - whisper 事件必须只用 whisper 回复；不要在 whisper 事件里调用默认 party 回复。
@@ -156,11 +177,12 @@ INSTRUCTIONS = """你是 WoW PlayerBot 队伍级 Agent。
 - 如果你调用了观察工具来回答玩家问题，拿到结论后必须用 wow_reply 发回原请求频道。
 - 固定入口 bot 是“瓦小狸”；say/yell 点名它时由它承接。party/raid 仍按当前队伍上下文回复，只有瓦小狸在当前上下文里时 MCP 才会优先用它。
 - 不要沿用历史里的固定发言人名字。
-- 当玩家问“你是谁/你是什么天赋/你能不能加血/切输出/谁是坦克”等身份、职责、天赋、策略问题时，先调用 wow_get_bot_profile 或 wow_get_supported_bot_strategies；不要凭职业名猜。
+- 当玩家问“你是谁/你是什么天赋/你能不能加血/切输出/谁是坦克”等身份、职责、天赋、策略问题时，先对目标单个 bot 调用 wow_get_bot_profile 或 wow_get_supported_bot_strategies；不要凭职业名猜，也不要批量查询所有 bot 画像。
 - 如果 profile 里 spec 或 active_strategies 为空，明确说“当前上下文没拿到真实天赋/策略”，不要编造技能、天赋或位置信息。
 - 当玩家让 bot 切职责或流派时，优先用 wow_set_bot_role；只开关单个策略时再用 wow_set_bot_strategy 或专用工具。这是 AI 策略切换，不等于重洗真实天赋。
 - 当玩家要求“第二天赋/双天赋/天赋页/重置天赋/洗天赋/切天赋”时，先调用 wow_get_bot_profile 查目标角色；如果 profile.talent_groups.known=true 且 has_second=false，不要执行替代动作，直接 wow_reply 说明没有第二套天赋，并带上 profile.talent_groups.second_unavailable_reason；如果 known=false，就说明当前拿不到天赋页数据。
 - 当玩家要求真实天赋操作且工具需要 GM 权限时，只允许走 MCP 暴露的受审计工具；工具拒绝 admin_only 时，把权限不足原因回复给玩家。Wuya 这类已有 GM 权限的角色可以使用这些受控高权限工具。
+- 当玩家询问 GM 命令、GM 命令组合或“怎么用命令实现某个需求”时，必须先调用 wow_search_gm_command_help(current_event_id, query=玩家需求)；严格按返回的 command.help 和 recipes 回答，不要凭记忆猜命令、参数或法术 ID。这个工具只读，不代表你可以执行任意 GM 命令。
 - 当玩家说“队友上线/队伍里的人上线/当前小队里的人上线”时，先用 current_event_id 调 wow_get_party_state 和 wow_get_last_command_diagnostic；能从当前队伍、最近成功动作或玩家点名推断机器人名字时直接处理，不要改问职业配置。
 - “我/你”按当前应答 bot 理解；party/raid/say 默认由瓦小狸承接，whisper 默认由被私聊 bot 承接。回答时要让玩家知道是谁在说话，但保持简短。
 - 任务插件/任务进度刷屏不需要进入对话窗口；玩家问任务时直接使用任务库和角色任务进度工具查询。
@@ -180,6 +202,7 @@ class HermesClient:
         timeout: int,
         trace_raw: bool = False,
         store: bool = False,
+        truncation_auto: bool = True,
         payload_mode: str = "minimal",
         include_recent_actions: bool = False,
     ) -> None:
@@ -189,6 +212,7 @@ class HermesClient:
         self.timeout = timeout
         self.trace_raw = trace_raw
         self.store = store
+        self.truncation_auto = truncation_auto
         self.payload_mode = normalize_payload_mode(payload_mode)
         self.include_recent_actions = include_recent_actions
 
@@ -198,6 +222,7 @@ class HermesClient:
         conversation: str,
         event: dict[str, Any],
         action_results: list[dict[str, Any]],
+        recent_chat_context: list[dict[str, Any]] | None = None,
         session: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         event_payload = event_payload_for_hermes(event, self.payload_mode)
@@ -211,6 +236,8 @@ class HermesClient:
             "context_mode": "on_demand" if self.payload_mode == "minimal" else "embedded",
             "session": session_payload,
         }
+        if recent_chat_context:
+            envelope["recent_chat_context"] = recent_chat_context
         if self.include_recent_actions:
             envelope["recent_action_results"] = action_results
         payload = {
@@ -224,6 +251,8 @@ class HermesClient:
             ),
             "store": self.store,
         }
+        if self.truncation_auto:
+            payload["truncation"] = "auto"
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -236,6 +265,8 @@ class HermesClient:
             url=self.url,
             payload_mode=self.payload_mode,
             include_recent_actions=self.include_recent_actions,
+            truncation_auto=self.truncation_auto,
+            recent_chat_count=len(recent_chat_context or []),
             event_payload=event_payload if self.trace_raw else None,
             recent_action_results=action_results if self.trace_raw and self.include_recent_actions else None,
         )
@@ -382,6 +413,79 @@ def event_payload_for_hermes(event: dict[str, Any], payload_mode: str = "minimal
     return payload
 
 
+def compact_chat_text(value: Any, limit: int = RECENT_CHAT_TEXT_LIMIT) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def recent_chat_limit() -> int:
+    return min(RECENT_CHAT_MAX_LIMIT, env_int("PLAYERBOT_HERMES_RECENT_CHAT_LIMIT", RECENT_CHAT_DEFAULT_LIMIT, 0))
+
+
+def recent_visible_reply_for_event(db: MysqlCli, event_id: int, channel: str) -> dict[str, str]:
+    expected_channel = str(channel or "").strip().lower()
+    for action in fetch_action_results(db, int(event_id), limit=8):
+        if str(action.get("action_type") or "") != "reply" or str(action.get("status") or "") != "done":
+            continue
+        if expected_channel and str(action.get("channel") or "").strip().lower() != expected_channel:
+            continue
+        text = compact_chat_text(action.get("text"))
+        if text:
+            return {"bot": str(action.get("bot_name") or ""), "text": text}
+    return {}
+
+
+def recent_chat_context_for_event(db: MysqlCli, event: dict[str, Any], limit: int | None = None) -> list[dict[str, Any]]:
+    bounded_limit = recent_chat_limit() if limit is None else max(0, min(int(limit), RECENT_CHAT_MAX_LIMIT))
+    if bounded_limit <= 0:
+        return []
+
+    event_id = int(event.get("id") or 0)
+    if event_id <= 1:
+        return []
+
+    base = base_conversation_for(event)
+    channel = str(event.get("channel") or "").strip().lower()
+    query_speaker_guid = 0
+    query_group_leader_guid = 0
+    if channel in {"party", "raid"}:
+        query_group_leader_guid = int(event.get("group_leader_guid") or 0)
+    else:
+        query_speaker_guid = int(event.get("speaker_guid") or 0)
+
+    raw_events = fetch_events(
+        db,
+        after_id=0,
+        max_id=event_id - 1,
+        limit=max(bounded_limit * RECENT_CHAT_FETCH_MULTIPLIER, bounded_limit),
+        speaker_guid=query_speaker_guid,
+        group_leader_guid=query_group_leader_guid,
+        channel=channel,
+        newest_first=True,
+    )
+    matched = [item for item in raw_events if base_conversation_for(item) == base]
+    matched = list(reversed(matched[:bounded_limit]))
+
+    context: list[dict[str, Any]] = []
+    for item in matched:
+        message = compact_chat_text(item.get("message"))
+        if not message:
+            continue
+        entry: dict[str, Any] = {
+            "event_id": int(item.get("id") or 0),
+            "channel": str(item.get("channel") or ""),
+            "speaker": str(item.get("speaker_name") or ""),
+            "message": message,
+        }
+        reply = recent_visible_reply_for_event(db, int(item.get("id") or 0), str(item.get("channel") or ""))
+        if reply:
+            entry["visible_reply"] = reply
+        context.append(entry)
+    return context
+
+
 def anchor_bot_name() -> str:
     return os.getenv("PLAYERBOT_AGENT_ANCHOR_BOT_NAME", ANCHOR_BOT_DEFAULT_NAME).strip()
 
@@ -525,6 +629,12 @@ def simple_social_reply_text(message: str) -> str | None:
         return "我在。"
     if text in THANKS_MESSAGES:
         return "不客气。"
+    if text in BYE_MESSAGES:
+        if text == "晚安":
+            return "晚安。"
+        return "拜拜。"
+    if text in ECHO_MESSAGES:
+        return text
     return None
 
 
@@ -554,6 +664,18 @@ def intrinsic_command_request(message: str) -> str:
         if text.endswith(alias):
             text = text[: -len(alias)]
     return INTRINSIC_COMMANDS.get(text, "")
+
+
+def group_with_bot_request(message: str) -> bool:
+    text = SOCIAL_PUNCT_RE.sub("", compact_message(message))
+    if not text:
+        return False
+    for alias in sorted((alias.lower() for alias in anchor_bot_aliases()), key=len, reverse=True):
+        if text.startswith(alias):
+            text = text[len(alias):]
+        if text.endswith(alias):
+            text = text[: -len(alias)]
+    return text in GROUP_WITH_BOT_MESSAGES
 
 
 def parse_stack_count(text: str) -> int:
@@ -681,6 +803,11 @@ def localized_action_error(error: str) -> str:
         "target player is not online": "目标玩家不在线",
         "target player is not in requester's group": "目标玩家不在你的队伍里",
         "target player is not near the mage bot": "目标玩家离法师太远",
+        "target player is already grouped or invited": "目标已经在队伍里或已有组队邀请",
+        "target player is wrong faction": "目标阵营不匹配",
+        "requester is not group leader or assistant": "你不是队长或助理，不能邀请",
+        "group is full": "队伍已经满了",
+        "cannot invite self": "不能邀请自己",
         "target player cannot store consumables; bags may be full": "目标玩家背包可能满了",
         "empty consumable request": "没有指定要水还是吃的",
         "requester is not online": "服务端暂时没找到你的在线会话，操作没有执行",
@@ -967,6 +1094,8 @@ class Relay:
             return
         if self.try_handle_simple_social_message(event):
             return
+        if self.try_handle_group_with_bot_request(event):
+            return
         if self.try_handle_intrinsic_command(event):
             return
         if self.try_handle_consumable_request(event):
@@ -985,7 +1114,14 @@ class Relay:
         )
         include_recent_actions = bool(getattr(self.client, "include_recent_actions", False))
         action_results = fetch_action_results(self.db, int(event["id"]), limit=8) if include_recent_actions else []
-        response = self.client.send_event(conversation=conversation, event=event, action_results=action_results, session=session)
+        recent_chat_context = recent_chat_context_for_event(self.db, event)
+        response = self.client.send_event(
+            conversation=conversation,
+            event=event,
+            action_results=action_results,
+            recent_chat_context=recent_chat_context,
+            session=session,
+        )
         settled_results = self.wait_for_action_results(int(event["id"]))
         self.ensure_visible_reply(event, settled_results, hermes_text=response_text(response))
 
@@ -1040,6 +1176,59 @@ class Relay:
             command=command,
             reason="handled_by_playerbot_instinct",
         )
+        return True
+
+    def try_handle_group_with_bot_request(self, event: dict[str, Any]) -> bool:
+        if not group_with_bot_request(str(event.get("message") or "")):
+            return False
+
+        event_id = int(event["id"])
+        channel = reply_channel_for_event(event)
+        bot_name = select_reply_bot(event, [], channel=channel)
+        if not bot_name:
+            log_event(
+                "fast_group_with_bot_no_target",
+                event_id=event_id,
+                channel=channel,
+                speaker=event.get("speaker_name"),
+                message=event.get("message"),
+            )
+            self.enqueue_visible_reply(event, "我当前没看到可组队的机器人。", channel=channel, reason="fast_group_with_bot_no_target")
+            return True
+
+        enqueue_result = enqueue_action(
+            self.db,
+            event=event,
+            action_type="invite_player",
+            payload={
+                "target_player": bot_name,
+                "fast_path": True,
+                "reason": "group_with_bot",
+            },
+        )
+        action_id = int(enqueue_result.get("action_id") or 0)
+        log_event(
+            "fast_group_with_bot_request",
+            event_id=event_id,
+            action_id=action_id,
+            bot=bot_name,
+            channel=channel,
+            speaker=event.get("speaker_name"),
+            message=event.get("message"),
+            deduped=enqueue_result.get("deduped"),
+        )
+
+        action_result = self.wait_for_action_result(event_id, action_id)
+        error = str(action_result.get("error") or "").strip() if action_result else ""
+        status = str(action_result.get("status") or "").strip().lower() if action_result else ""
+        if status == "done" and not error:
+            reply = "组队邀请已处理。"
+        elif error:
+            reply = f"组队没成：{localized_action_error(error)}。"
+        else:
+            reply = "已提交组队邀请，服务端结果还在等。"
+
+        self.enqueue_visible_reply(event, reply, channel=channel, requested_bot=bot_name, reason="fast_group_with_bot_result")
         return True
 
     def try_handle_consumable_request(self, event: dict[str, Any]) -> bool:
@@ -1343,6 +1532,7 @@ def main() -> int:
         env_int("PLAYERBOT_HERMES_TIMEOUT", 120, 1),
         trace_raw=env_bool("PLAYERBOT_HERMES_TRACE_RAW", False),
         store=env_bool("PLAYERBOT_HERMES_STORE", False),
+        truncation_auto=env_bool("PLAYERBOT_HERMES_TRUNCATION_AUTO", True),
         payload_mode=os.getenv("PLAYERBOT_HERMES_PAYLOAD_MODE", "minimal"),
         include_recent_actions=env_bool("PLAYERBOT_HERMES_INCLUDE_RECENT_ACTIONS", False),
     )
@@ -1362,6 +1552,8 @@ def main() -> int:
         hermes_url=client.url,
         model=client.model,
         store=client.store,
+        truncation_auto=client.truncation_auto,
+        recent_chat_limit=recent_chat_limit(),
         state=str(args.state),
     )
     relay.save()

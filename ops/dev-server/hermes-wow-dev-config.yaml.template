@@ -1,12 +1,12 @@
 custom_providers:
-  - name: deepseek-wow
-    base_url: https://api.deepseek.com/v1
-    key_env: DEEPSEEK_API_KEY
+  - name: siliconflow-wow
+    base_url: https://api.siliconflow.cn/v1
+    key_env: SILICONFLOW_API_KEY
     api_mode: chat_completions
 
 model:
-  provider: custom:deepseek-wow
-  default: deepseek-v4-flash
+  provider: custom:siliconflow-wow
+  default: nex-agi/Nex-N2-Pro
   api_mode: chat_completions
   max_tokens: 2048
 
@@ -38,6 +38,7 @@ mcp_servers:
         - wow_get_recent_combat_summaries
         - wow_get_combat_summary
         - wow_get_playerbot_command_catalog
+        - wow_search_gm_command_help
         - wow_get_bot_profile
         - wow_get_supported_bot_strategies
         - wow_reply

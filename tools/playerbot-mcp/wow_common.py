@@ -63,6 +63,8 @@ EVENT_ZH: dict[str, str] = {
     "tool_recent_combat_summaries": "工具调用：读取最近战斗摘要",
     "tool_combat_summary": "工具调用：读取战斗详情",
     "tool_playerbot_command_catalog": "工具调用：读取 Playerbot 命令目录",
+    "tool_gm_command_help": "工具调用：读取 GM 命令帮助",
+    "tool_gm_command_help_failed": "工具调用：读取 GM 命令帮助失败",
     "tool_bot_profile": "工具调用：读取机器人画像",
     "tool_supported_bot_strategies": "工具调用：读取机器人策略清单",
     "tool_reply": "工具调用：机器人回复",

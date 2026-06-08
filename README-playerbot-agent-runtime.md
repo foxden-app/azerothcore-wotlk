@@ -2,7 +2,7 @@
 
 这是 `playerbot-agent` 分支的运行说明。它不是架构设计文档；架构和开发方向以 [ARCHITECTURE-agent-playerbots.md](ARCHITECTURE-agent-playerbots.md) 为准。
 
-当前生产服务器是 GJZN。当前开发机只负责写代码、测试、必要时编译，然后发布到 GJZN。不要把 T490、本地 WSL 或 RT worldserver 当成生产服务重启，除非明确是在做本地调试或回滚演练。
+当前生产服务器和主要开发主机都是 GJZN。Codex 通常运行在 GJZN 的 `/home/wuya/git/azerothcore-wotlk-dev`，写代码、测试、必要时编译，然后显式发布到 `/home/wuya/git/azerothcore-wotlk-git`。不要把 T490、本地 WSL 或 RT worldserver 当成生产服务重启，除非明确是在做本地调试或回滚演练。
 
 ## 源码
 
@@ -15,18 +15,18 @@
 
 `modules/mod-playerbots` 是一个本地嵌套 Git checkout，并被根仓库忽略。这符合 AzerothCore 模块的常见使用方式。
 
-新开发机如果缺这个目录，先从 GJZN 当前生产工作树补齐，保证本地编译和生产模块一致：
+当前 GJZN dev checkout 如果缺这个目录，先从 GJZN 当前生产工作树补齐，保证本地编译和生产模块一致：
 
 ```bash
 rsync -az --delete --exclude='.git/' \
-  GJZN:/home/wuya/git/azerothcore-wotlk-git/modules/mod-playerbots/ \
+  /home/wuya/git/azerothcore-wotlk-git/modules/mod-playerbots/ \
   modules/mod-playerbots/
 ```
 
 ## GJZN 生产路径
 
-- LAN SSH：`ssh GJZN`
-- 公网 SSH：`ssh GJZN-public`，`38.207.189.99:8026`
+- Codex 通常就在 GJZN 本机运行；`hostname` 为 `GJZN` 时直接执行本地 `systemctl`、`ss`、`docker`、`mysql`、`journalctl` 命令，不要再 `ssh GJZN` 回本机。
+- 从其他机器访问 GJZN：LAN `ssh GJZN`，公网 `ssh GJZN-public`，`38.207.189.99:8026`
 - GJZN 运行根目录：`/home/wuya/git/azerothcore-wotlk-git`
 - Hermes Compose：`/home/wuya/srv/hermes-wow/docker-compose.yml`
 - Runtime：`/home/wuya/git/azerothcore-wotlk-git/env/dist`
@@ -115,22 +115,23 @@ bot 账号前缀是 `pbagent`。初始数据库里有 55 个 bot 账号、550 �
 查看 GJZN 状态：
 
 ```bash
-ssh GJZN 'systemctl is-active azerothcore-auth.service azerothcore-world.service azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service'
-ssh GJZN 'ss -ltnp | egrep ":(3724|8085|7879|8642|18765|18080)\b" || true'
-ssh GJZN 'docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
+hostname
+systemctl is-active azerothcore-auth.service azerothcore-world.service azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service
+ss -ltnp | egrep ":(3724|8085|7879|8642|18765|18080)\b" || true
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 ```
 
 部署 Python 侧车：
 
 ```bash
 python3 -m py_compile tools/playerbot-mcp/wow_common.py tools/playerbot-mcp/hermes_relay.py tools/playerbot-mcp/server.py
-rsync -az tools/playerbot-mcp/ GJZN:/home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/
-rsync -az tools/account-register/ GJZN:/home/wuya/git/azerothcore-wotlk-git/tools/account-register/
-ssh GJZN 'sudo systemctl restart azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service'
-ssh GJZN '/home/wuya/git/azerothcore-wotlk-git/var/playerbot-mcp-venv/bin/python -m unittest /home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/test_playerbot_mcp.py'
+rsync -az tools/playerbot-mcp/ /home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/
+rsync -az tools/account-register/ /home/wuya/git/azerothcore-wotlk-git/tools/account-register/
+sudo systemctl restart azerothcore-playerbot-mcp.service azerothcore-playerbot-hermes-relay.service azerothcore-account-register.service
+/home/wuya/git/azerothcore-wotlk-git/var/playerbot-mcp-venv/bin/python -m unittest /home/wuya/git/azerothcore-wotlk-git/tools/playerbot-mcp/test_playerbot_mcp.py
 ```
 
-部署 C++/world 前必须确认当前开发机有编译产物：
+部署 C++/world 前必须确认当前 checkout 有编译产物：
 
 ```bash
 find var -name CMakeCache.txt -o -name worldserver -o -name authserver
@@ -293,13 +294,13 @@ Hermes Harness 模式把旧 Python 侧车拆成两层：
 ```text
 agent_playerbot_events
   -> azerothcore-playerbot-hermes-relay.service
-  -> RT Hermes API
+  -> GJZN hermes-wow API
   -> azerothcore-playerbot-mcp.service
   -> agent_playerbot_actions
   -> worldserver
 ```
 
-RT 现在同时跑 WoW MCP 服务、事件 relay 和 Hermes 容器。MCP 默认监听 `0.0.0.0:18765`，Hermes 从 RT 本机调用它；T490/当前开发机不再承担生产侧车。
+GJZN 现在同时跑 WoW MCP 服务、事件 relay 和 Hermes 容器。MCP 默认监听 `0.0.0.0:18765`，Hermes 容器在 GJZN 本机调用它；T490、本地 WSL 和 RT 不再承担生产侧车。
 
 ### 天赋与 GM 操作边界
 
@@ -309,23 +310,23 @@ RT 现在同时跑 WoW MCP 服务、事件 relay 和 Hermes 容器。MCP 默认�
 - GM/高权限操作只能走 MCP 暴露的受审计工具。Wuya 这类 GM 角色可以执行允许的高权限工具；非 GM 或不在白名单的角色要明确回复权限不足。
 - 禁止让 Hermes 拼接任意 GM 命令、SQL、terminal 或文件操作。
 
-RT 生产部署文件在 `ops/rt-wow-migration/`，Hermes 模板仍保存在 `ops/hermes-wow/`：
+RT 部署文件在 `ops/rt-wow-migration/`，现在只作为历史/回滚参考；GJZN Hermes 模板保存在 `ops/hermes-wow/`：
 
-- `ops/rt-wow-migration/docker-compose.yml`：`wow-auth`、`wow-world` 的运行镜像和 host network。
-- `ops/rt-wow-migration/systemd/`：RT MCP、relay、注册页 unit 模板。
-- `ops/hermes-wow/compose.yaml`：Hermes 容器模板，API 端口 `8642`，dashboard 端口 `9119` 只绑定 RT 本机。
+- `ops/rt-wow-migration/docker-compose.yml`：旧 RT `wow-auth`、`wow-world` 的运行镜像和 host network。
+- `ops/rt-wow-migration/systemd/`：旧 RT MCP、relay、注册页 unit 模板。
+- `ops/hermes-wow/compose.yaml`：Hermes 容器模板，API 端口 `8642`，dashboard 端口 `9119` 只绑定 GJZN 本机。
 - `config.yaml.template`：DeepSeek provider 和 `wow_playerbot` MCP server 配置模板。
 - `wow-playerbot-control/SKILL.md`：给 Hermes 的 WoW 队伍级操作约束。
 
-查看 dashboard 时先开 SSH 隧道：
+在 GJZN 本机查看 dashboard：
 
 ```bash
-ssh -p 8022 -L 9119:127.0.0.1:9119 wuya@38.207.189.99
+curl -I http://127.0.0.1:9119
 ```
 
-然后在本机打开 `http://127.0.0.1:9119`。
+从其他机器查看时再按需开到 GJZN 的 SSH 隧道。
 
-刷新 RT 侧车：
+刷新 GJZN 生产侧车见上面的“部署 Python 侧车”。旧 RT 刷新命令只用于回滚演练：
 
 ```bash
 ops/rt-wow-migration/deploy.sh deploy-sidecar
@@ -346,7 +347,7 @@ ssh -p 8022 wuya@38.207.189.99 'journalctl -u azerothcore-playerbot-hermes-relay
 ssh -p 8022 wuya@38.207.189.99 'docker logs -f hermes-wow'
 ```
 
-`PLAYERBOT_HERMES_STORE=0` 是生产默认值：WoW 事件不写入 Hermes 长会话，避免历史上下文膨胀到十几万 token。`PLAYERBOT_HERMES_PAYLOAD_MODE=minimal` 时，每轮只给 Hermes 当前消息和基础路由字段；战斗、位置、队伍、任务、背包、游戏环境和最近动作结果都由 Hermes 按需调用 MCP 工具查询。
+`PLAYERBOT_HERMES_STORE=1` 是生产默认值：同一个 WoW conversation 通过 Hermes Responses 的 `conversation -> latest_response_id` 链自动续上下文。保持 `PLAYERBOT_HERMES_TRUNCATION_AUTO=1`，由 Hermes 只带最近窗口继续推理。`PLAYERBOT_HERMES_PAYLOAD_MODE=minimal` 时，每轮 relay 只给 Hermes 当前消息和基础路由字段；战斗、位置、队伍、任务、背包、游戏环境和最近动作结果都由 Hermes 按需调用 MCP 工具查询。`PLAYERBOT_HERMES_RECENT_CHAT_LIMIT=0` 是默认值：正常聊天上下文完全由 Hermes session 管理。只有排查 response store 故障时才临时设为小值，额外附带同一 WoW conversation 的少量玩家消息和可见回复作为兜底。
 
 `PLAYERBOT_HERMES_CONVERSATION_EPOCH` 用来主动切换 Hermes 会话命名空间。迁服、工具配置变化或旧会话上下文过大时，改一个新值即可让后续消息进入新会话，避开旧 event_id 和长历史。
 
