@@ -1,14 +1,15 @@
-custom_providers:
-  - name: siliconflow-wow
-    base_url: https://api.siliconflow.cn/v1
-    key_env: SILICONFLOW_API_KEY
-    api_mode: chat_completions
-
 model:
   provider: custom:siliconflow-wow
   default: nex-agi/Nex-N2-Pro
   api_mode: chat_completions
   max_tokens: 2048
+
+providers:
+  siliconflow-wow:
+    api: https://api.siliconflow.cn/v1
+    name: siliconflow-wow
+    key_env: SILICONFLOW_API_KEY
+    transport: chat_completions
 
 mcp_servers:
   wow_playerbot:

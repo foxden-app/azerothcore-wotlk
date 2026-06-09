@@ -3,7 +3,6 @@ services:
     image: docker.1panel.live/nousresearch/hermes-agent:latest
     container_name: hermes-wow-dev
     restart: unless-stopped
-    init: true
     network_mode: host
     volumes:
       - /home/wuya/.hermes-wow-dev:/opt/data

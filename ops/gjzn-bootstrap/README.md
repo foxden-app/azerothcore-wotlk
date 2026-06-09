@@ -65,7 +65,7 @@ Host GJZN-public
 - `frpc-chml-unicom.service`：线路二公网 `8.162.5.68:8085`，备用 auth `8.162.5.68:8724`
 - `azerothcore-dev-world.service`：敏捷测试 world，`127.0.0.1:8086`，SOAP `127.0.0.1:7880`
 - `azerothcore-dev-playerbot-mcp.service` / `azerothcore-dev-playerbot-hermes-relay.service`：敏捷测试 Agent 链路
-- `azerothcore-dev-hermes-wow.service`：敏捷测试 Hermes，API `127.0.0.1:8643`，dashboard `127.0.0.1:9120`
+- `azerothcore-dev-hermes-wow.service`：敏捷测试 Hermes，API `127.0.0.1:8643`，dashboard `127.0.0.1:9120`。测试服 2026-06-09 已更新到 Hermes Agent `0.16.0`；该镜像使用 s6 overlay，compose 不要设置 `init: true`。
 - `frpc-acore-dev.service`：敏捷测试公网 world `38.207.189.99:8086`
 - `frpc-gjzn.service`：GJZN 公网 SSH `38.207.189.99:8026`
 

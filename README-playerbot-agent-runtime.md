@@ -318,6 +318,8 @@ RT 部署文件在 `ops/rt-wow-migration/`，现在只作为历史/回滚参考�
 - `config.yaml.template`：DeepSeek provider 和 `wow_playerbot` MCP server 配置模板。
 - `wow-playerbot-control/SKILL.md`：给 Hermes 的 WoW 队伍级操作约束。
 
+敏捷测试 Hermes 模板在 `ops/dev-server/`。Hermes Agent `0.16.0` 起 Docker 镜像由 s6 overlay 监管 gateway/dashboard，dev compose 不要设置 Docker `init: true`；配置模板优先使用 0.16 的 `providers:` schema。
+
 在 GJZN 本机查看 dashboard：
 
 ```bash

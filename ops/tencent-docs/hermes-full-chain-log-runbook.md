@@ -73,7 +73,7 @@ title: Hermes全链路日志排查指引
 | Hermes service | `azerothcore-dev-hermes-wow.service` |
 | Hermes 容器 | `hermes-wow-dev` |
 | Hermes compose | `/home/wuya/srv/hermes-wow-dev/docker-compose.yml` |
-| Hermes 镜像 | `docker.1panel.live/nousresearch/hermes-agent:latest` |
+| Hermes 镜像 | `docker.1panel.live/nousresearch/hermes-agent:latest`；2026-06-09 测试服已更新到 Hermes Agent `0.16.0`，镜像 digest `sha256:4cf80cce5e92a503d8feae898fd7ba063e208d89bf67806f37198bbe3a3b6d9f` |
 | Hermes API | `http://127.0.0.1:8643/v1/responses` |
 | Hermes dashboard | `http://127.0.0.1:9120` |
 | MCP service | `azerothcore-dev-playerbot-mcp.service` |
@@ -88,6 +88,10 @@ title: Hermes全链路日志排查指引
 | DB | `acore_dev_playerbots.agent_playerbot_events`、`acore_dev_playerbots.agent_playerbot_actions` |
 
 测试服 world service 有专门的 drop-in：`/etc/systemd/system/azerothcore-dev-world.service.d/playerbots-db.conf`，必须设置 `AC_PLAYERBOTS_DATABASE_INFO=127.0.0.1;3306;acore;acore;acore_dev_playerbots`。如果测试服 action 跑到生产库，优先查这个 drop-in。
+
+Hermes Agent `0.16.0` 的 Docker 镜像使用 s6 overlay 自行作为 PID 1 监管 gateway/dashboard；测试服 compose 不要设置 Docker `init: true`，否则会出现 `s6-overlay-suexec: fatal: can only run as pid 1` 并反复重启。0.16 首次启动会把旧 `custom_providers` 自动迁移为 `providers:` schema，手写模板优先使用 `api`、`key_env`、`transport` 字段。
+
+2026-06-09 验证 sub2api OpenAI Responses 接入：`/v1/models` 可列出 `gpt-5.5` 等模型，但 `/v1/responses` 普通请求返回 `403 This account only allows Codex official clients`；加 Codex CLI 风格 `User-Agent`、`originator` 和 `OpenAI-Beta` 后，上游返回 `401 token_invalidated`。结论是当前 sub2api key/上游 OpenAI OAuth 账号不能作为 Hermes 默认 provider 使用；测试服 Hermes 已回切原 xfyun provider，保留 sub2api provider 条目仅用于后续换有效账号后再测。
 
 ## 快速健康检查
 
