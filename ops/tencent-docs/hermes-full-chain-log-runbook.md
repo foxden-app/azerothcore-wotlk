@@ -4,7 +4,7 @@ title: Hermes全链路日志排查指引
 
 # Hermes全链路日志排查指引
 
-更新时间：2026-05-28
+更新时间：2026-06-10
 
 本文用于排查瓦小狸从游戏消息进入 worldserver，到 Hermes Agent 调用 MCP 工具，再回到游戏内回复或执行动作的完整闭环。现在生产服和敏捷测试服都在 GJZN 本机上；如果命令是在 GJZN 上执行，直接运行本地命令，不要 `ssh GJZN` 回本机。从其他机器连入时再使用 `ssh GJZN` 或 `ssh GJZN-public`。
 
@@ -44,7 +44,8 @@ title: Hermes全链路日志排查指引
 | SOAP | `0.0.0.0:7879` |
 | Hermes 容器 | `hermes-wow` |
 | Hermes compose | `/home/wuya/srv/hermes-wow/docker-compose.yml` |
-| Hermes 镜像 | `docker.1panel.live/nousresearch/hermes-agent:latest` |
+| Hermes 镜像 | `docker.1panel.live/nousresearch/hermes-agent:latest`；2026-06-10 生产服已更新到 Hermes Agent `0.16.0`，镜像 digest `sha256:4cf80cce5e92a503d8feae898fd7ba063e208d89bf67806f37198bbe3a3b6d9f` |
+| Hermes 默认 provider | `custom:xfyun-wow` / `xopqwen36v35b`；旧 `custom:siliconflow-wow` 仅保留为非默认备用 |
 | Hermes API | `http://127.0.0.1:8642/v1/responses` |
 | Hermes dashboard | `http://127.0.0.1:9119` |
 | MCP service | `azerothcore-playerbot-mcp.service` |
@@ -59,6 +60,10 @@ title: Hermes全链路日志排查指引
 | DB | `acore_playerbots.agent_playerbot_events`、`acore_playerbots.agent_playerbot_actions` |
 
 生产 Hermes 没有单独的 `azerothcore-hermes-wow.service`。它由 Docker Compose 创建，容器配置 `restart: unless-stopped`，随 Docker daemon 恢复。生产 relay 当前关键配置是：`PLAYERBOT_HERMES_LISTEN_SCOPE=direct`、`PLAYERBOT_HERMES_PAYLOAD_MODE=minimal`、`PLAYERBOT_HERMES_STORE=0`、`PLAYERBOT_HERMES_SKIP_BACKLOG_ON_START=1`、`PLAYERBOT_MCP_REJECT_PROCESSED_EVENT_ACTIONS=1`。
+
+Hermes Agent `0.16.0` 的 Docker 镜像使用 s6 overlay 自行作为 PID 1 监管 gateway/dashboard；生产和测试服 compose 都不要设置 Docker `init: true`，否则会出现 `s6-overlay-suexec: fatal: can only run as pid 1` 并反复重启。生产 dashboard 在容器内绑定 `0.0.0.0`，宿主机仅发布 `127.0.0.1:9119`，因此 compose 显式设置 `HERMES_DASHBOARD_INSECURE=1` 让本机面板可用。
+
+2026-06-10 生产服将默认模型从失效的 SiliconFlow `nex-agi/Nex-N2-Pro` 切到测试服同款讯飞 `xopqwen36v35b`。验证结果：`http://127.0.0.1:8642/v1/responses` 使用生产 API key 返回 HTTP 200，文本 `pong`。
 
 ## 测试服位置表
 

@@ -315,10 +315,12 @@ RT 部署文件在 `ops/rt-wow-migration/`，现在只作为历史/回滚参考�
 - `ops/rt-wow-migration/docker-compose.yml`：旧 RT `wow-auth`、`wow-world` 的运行镜像和 host network。
 - `ops/rt-wow-migration/systemd/`：旧 RT MCP、relay、注册页 unit 模板。
 - `ops/hermes-wow/compose.yaml`：Hermes 容器模板，API 端口 `8642`，dashboard 端口 `9119` 只绑定 GJZN 本机。
-- `config.yaml.template`：DeepSeek provider 和 `wow_playerbot` MCP server 配置模板。
+- `config.yaml.template`：生产默认 `xfyun-wow` provider 和 `wow_playerbot` MCP server 配置模板；旧 `siliconflow-wow` 仅保留为非默认备用 provider。
 - `wow-playerbot-control/SKILL.md`：给 Hermes 的 WoW 队伍级操作约束。
 
-敏捷测试 Hermes 模板在 `ops/dev-server/`。Hermes Agent `0.16.0` 起 Docker 镜像由 s6 overlay 监管 gateway/dashboard，dev compose 不要设置 Docker `init: true`；配置模板优先使用 0.16 的 `providers:` schema。
+生产和敏捷测试 Hermes 现在都使用 Hermes Agent `0.16.0`。0.16 起 Docker 镜像由 s6 overlay 监管 gateway/dashboard，compose 不要设置 Docker `init: true`；配置模板优先使用 0.16 的 `providers:` schema。生产服 2026-06-10 已从失效的 SiliconFlow 默认模型切到测试服同款 `xfyun-wow` / `xopqwen36v35b`。生产 dashboard 在容器内必须绑定 `0.0.0.0` 才能通过 Docker 端口映射访问，同时宿主机只发布 `127.0.0.1:9119`，所以 compose 显式设置 `HERMES_DASHBOARD_INSECURE=1`。
+
+敏捷测试 Hermes 模板在 `ops/dev-server/`。
 
 在 GJZN 本机查看 dashboard：
 

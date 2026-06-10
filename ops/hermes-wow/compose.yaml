@@ -13,6 +13,9 @@ services:
       - /home/wuya/.hermes-wow/.env
     environment:
       HERMES_DASHBOARD: "1"
+      HERMES_DASHBOARD_HOST: "0.0.0.0"
+      HERMES_DASHBOARD_PORT: "9119"
+      HERMES_DASHBOARD_INSECURE: "1"
       HERMES_UID: "1000"
       HERMES_GID: "1000"
       API_SERVER_ENABLED: "true"

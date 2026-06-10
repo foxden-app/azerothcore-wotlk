@@ -21,12 +21,12 @@
       "key": "runtime-readme",
       "title": "README-playerbot-agent-runtime",
       "source": "README-playerbot-agent-runtime.md",
-      "file_id": "dHzcgLCaCWmj",
-      "url": "https://docs.qq.com/doc/DZEh6Y2dMQ2FDV21q",
+      "file_id": "dxaDRCrkIZwq",
+      "url": "https://docs.qq.com/doc/DZHhhRFJDcmtJWndx",
       "sync": {
         "mode": "doc_from_markdown"
       },
-      "last_synced_at": "2026-06-09T17:12:57+08:00"
+      "last_synced_at": "2026-06-10T19:56:03+08:00"
     },
     {
       "key": "rt-runbook",
@@ -43,12 +43,12 @@
       "key": "gjzn-runbook",
       "title": "GJZN-bootstrap-runbook",
       "source": "ops/gjzn-bootstrap/README.md",
-      "file_id": "ddSbmgapFEzm",
-      "url": "https://docs.qq.com/doc/DZGRTYm1nYXBGRXpt",
+      "file_id": "dNZrqVzMZIwQ",
+      "url": "https://docs.qq.com/doc/DZE5acnFWek1aSXdR",
       "sync": {
         "mode": "doc_from_markdown"
       },
-      "last_synced_at": "2026-06-09T17:13:14+08:00"
+      "last_synced_at": "2026-06-10T19:56:05+08:00"
     },
     {
       "key": "agent-readme",

@@ -57,7 +57,7 @@ Host GJZN-public
 
 - `azerothcore-auth.service`：authserver，`0.0.0.0:3724`
 - `azerothcore-world.service`：worldserver，`0.0.0.0:8085`，SOAP `0.0.0.0:7879`
-- `hermes-wow`：Docker 容器，Hermes API `0.0.0.0:8642`，dashboard `127.0.0.1:9119`
+- `hermes-wow`：Docker 容器，Hermes API `0.0.0.0:8642`，dashboard `127.0.0.1:9119`。生产服 2026-06-10 已更新到 Hermes Agent `0.16.0`，默认 provider 为测试服同款 `custom:xfyun-wow` / `xopqwen36v35b`；该镜像使用 s6 overlay，compose 不要设置 `init: true`。
 - `azerothcore-playerbot-mcp.service`：MCP，`0.0.0.0:18765`
 - `azerothcore-playerbot-hermes-relay.service`：游戏事件转 Hermes
 - `azerothcore-account-register.service`：注册页，`127.0.0.1:18080`

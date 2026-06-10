@@ -1,14 +1,20 @@
-custom_providers:
-  - name: siliconflow-wow
-    base_url: https://api.siliconflow.cn/v1
-    key_env: SILICONFLOW_API_KEY
-    api_mode: chat_completions
-
 model:
-  provider: custom:siliconflow-wow
-  default: nex-agi/Nex-N2-Pro
+  provider: custom:xfyun-wow
+  default: xopqwen36v35b
   api_mode: chat_completions
   max_tokens: 2048
+
+providers:
+  xfyun-wow:
+    api: https://maas-api.cn-huabei-1.xf-yun.com/v2
+    name: xfyun-wow
+    key_env: XFYUN_API_KEY
+    transport: chat_completions
+  siliconflow-wow:
+    api: https://api.siliconflow.cn/v1
+    name: siliconflow-wow
+    key_env: SILICONFLOW_API_KEY
+    transport: chat_completions
 
 # This Hermes instance is dedicated to the WoW relay. Keep the API server
 # platform on the WoW MCP toolset only; the generic browser/file/terminal
