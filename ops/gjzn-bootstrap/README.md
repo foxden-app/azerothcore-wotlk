@@ -1,5 +1,7 @@
 # GJZN 初始化与运营记录
 
+> **现状（2026-07-12）**：Foxden 与 AzerothCore 生产栈已回迁到 `T490-Agent`。本文以下内容保留为 GJZN 历史部署和回滚参考，不再代表当前生产位置。GJZN 上相关 systemd 服务已停用，并通过 `ConditionPathExists=/etc/allow-gjzn-production` 冷备保护；只有显式创建该文件后才允许重新启动。`frpc-pentagi.service` 仍在 GJZN 正常运行。
+
 更新时间：2026-05-24
 
 GJZN（龟机智能）是新的 i7 机器。2026-05-23 已从 RT 接管 AzerothCore PlayerBot 生产服：auth/world 原生 systemd 运行，Hermes 用 Docker 容器，MCP/relay/注册页用 systemd，公网游戏入口通过 FRP 转发到 GJZN。
